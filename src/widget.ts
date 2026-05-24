@@ -94,6 +94,9 @@ export const initializeWidget = (
       logger.info("Widget API is available");
       const api = new WidgetApi(widgetId, parentOrigin);
       api.requestCapability(MatrixCapabilities.AlwaysOnScreen);
+      // Required for the matryoshka Matrix client to negotiate the widget
+      // transport and download encrypted/authenticated media via the host.
+      api.requestCapability(MatrixCapabilities.MSC4039DownloadFile);
       // asks if it wants thumbnails at all. if this
       // is on but media proxy isn't,
       // will try on the unathenticated media endpoint for them

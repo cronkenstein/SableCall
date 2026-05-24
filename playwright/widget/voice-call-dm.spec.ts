@@ -42,6 +42,15 @@ widgetTest(
 
     await expect(whistler.page.getByText("Incoming voice call")).toBeVisible();
     await whistler.page.getByRole("button", { name: "Join" }).click();
+    // Approve the widget-permissions dialog that Element Web shows for moe.sable.* capabilities.
+    try {
+      await whistler.page
+        .getByRole("dialog", { name: "Approve widget permissions" })
+        .getByRole("button", { name: "Approve" })
+        .click({ timeout: 5000 });
+    } catch {
+      // Dialog may not appear if capabilities were already approved.
+    }
 
     await expect(
       whistler.page.locator('iframe[title="Element Call"]'),
@@ -133,6 +142,15 @@ widgetTest(
 
     await expect(whistler.page.getByText("Incoming video call")).toBeVisible();
     await whistler.page.getByRole("button", { name: "Join" }).click();
+    // Approve the widget-permissions dialog that Element Web shows for moe.sable.* capabilities.
+    try {
+      await whistler.page
+        .getByRole("dialog", { name: "Approve widget permissions" })
+        .getByRole("button", { name: "Approve" })
+        .click({ timeout: 5000 });
+    } catch {
+      // Dialog may not appear if capabilities were already approved.
+    }
 
     await expect(
       whistler.page.locator('iframe[title="Element Call"]'),

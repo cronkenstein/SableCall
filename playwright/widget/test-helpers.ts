@@ -37,9 +37,33 @@ export class TestHelpers {
     await page.getByRole("menuitem", { name: "Element Call" }).click({
       timeout: 10000,
     });
+
+    // Element Web shows an "Approve widget permissions" dialog for any
+    // capability it doesn't recognise natively (e.g. moe.sable.*). This dialog
+    // blocks the widget transport from completing, so the lobby never renders.
+    // Approve it automatically so the widget can finish initialising.
+    const approveButton = page
+      .getByRole("dialog", { name: "Approve widget permissions" })
+      .getByRole("button", { name: "Approve" });
+    try {
+      await approveButton.click({ timeout: 5000 });
+    } catch {
+      // Dialog may not appear if capabilities were already approved or the
+      // host auto-approves them (e.g. the real Sable client).
+    }
   }
 
   public static async joinCallFromLobby(page: Page): Promise<void> {
+    // Approve any pending widget-permissions dialog before looking for the lobby.
+    const approveButton = page
+      .getByRole("dialog", { name: "Approve widget permissions" })
+      .getByRole("button", { name: "Approve" });
+    try {
+      await approveButton.click({ timeout: 5000 });
+    } catch {
+      // Dialog may not appear if capabilities were already approved.
+    }
+
     await expect(
       page
         .locator('iframe[title="Element Call"]')
@@ -88,6 +112,18 @@ export class TestHelpers {
     await page.getByRole("button", { name: "Join" }).click({
       timeout: 5000,
     });
+
+    // The EC widget may show an "Approve widget permissions" dialog for
+    // non-standard capabilities (moe.sable.*). Approve it automatically so
+    // the widget transport can complete and the call can be joined.
+    const approveButton = page
+      .getByRole("dialog", { name: "Approve widget permissions" })
+      .getByRole("button", { name: "Approve" });
+    try {
+      await approveButton.click({ timeout: 5000 });
+    } catch {
+      // Dialog may not appear if capabilities were already approved.
+    }
   }
 
   /**
