@@ -17,6 +17,7 @@ import { type MatrixClient } from "matrix-js-sdk";
 import { type WidgetApi } from "matrix-widget-api";
 
 import { useClientState } from "./ClientContext";
+import { widget } from "./widget";
 
 export enum Size {
   XS = "xs",
@@ -94,36 +95,40 @@ export const Avatar: FC<Props> = ({
       return;
     }
 
-    if (
-      clientState?.state !== "valid" ||
-      !clientState.authenticated?.client ||
-      !sizePx
-    ) {
-      setAvatarUrl(undefined);
-      return;
-    }
+    let blob: Promise<Blob>;
 
-    const client = clientState.authenticated.client;
-    const supportedFeatures = clientState.supportedFeatures;
-    const token = client.getAccessToken();
-    const useAuth = token != null || supportedFeatures.mediaProxy;
-    // if we have no auth, try to use old deprecated endpoint
-    const resolveSrc = getAvatarUrl(client, src, sizePx, useAuth);
-    if (!resolveSrc) {
+    if (widget?.api) {
+      blob = getAvatarFromWidgetAPI(widget.api, src);
+    } else if (
+      clientState?.state === "valid" &&
+      clientState.authenticated?.client &&
+      sizePx
+    ) {
+      const client = clientState.authenticated.client;
+      const supportedFeatures = clientState.supportedFeatures;
+      const token = client.getAccessToken();
+      const useAuth = token != null || supportedFeatures.mediaProxy;
+      // if we have no auth, try to use old deprecated endpoint
+      const resolveSrc = getAvatarUrl(client, src, sizePx, useAuth);
+      if (!resolveSrc) {
+        setAvatarUrl(undefined);
+        return;
+      }
+      // attach token if we have one already.
+      // otherwise, we are using the unauthenticated endpoint
+      // or we are counting on the host to add it in
+      const fetchOpts: RequestInit = token
+        ? { headers: { Authorization: `Bearer ${token}` } }
+        : {};
+      blob = fetch(resolveSrc, fetchOpts).then(async (req) => req.blob());
+    } else {
       setAvatarUrl(undefined);
       return;
     }
-    // attach token if we have one already.
-    // otherwise, we are using the unauthenticated endpoint
-    // or we are counting on the host to add it in
-    const fetchOpts: RequestInit = token
-      ? { headers: { Authorization: `Bearer ${token}` } }
-      : {};
 
     let objectUrl: string | undefined;
     let stale = false;
-    fetch(resolveSrc, fetchOpts)
-      .then(async (req) => req.blob())
+    blob
       .then((blob) => {
         if (stale) {
           return;
@@ -158,6 +163,32 @@ export const Avatar: FC<Props> = ({
     />
   );
 };
+
+async function getAvatarFromServer(
+  client: MatrixClient,
+  src: string,
+  sizePx: number,
+): Promise<Blob> {
+  const httpSrc = getAvatarUrl(client, src, sizePx);
+  if (!httpSrc) {
+    throw new Error("Failed to get http avatar URL");
+  }
+
+  const token = client.getAccessToken();
+  if (!token) {
+    throw new Error("Failed to get access token");
+  }
+
+  const request = await fetch(httpSrc, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const blob = await request.blob();
+
+  return blob;
+}
 
 // export for testing
 export async function getAvatarFromWidgetAPI(

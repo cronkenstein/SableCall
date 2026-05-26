@@ -14,6 +14,7 @@ import { type WidgetApi } from "matrix-widget-api";
 import { ClientContextProvider } from "./ClientContext";
 import { Avatar, getAvatarFromWidgetAPI } from "./Avatar";
 import { mockMatrixRoomMember, mockRtcMembership } from "./utils/test";
+import { widget } from "./widget";
 
 const TestComponent: FC<
   PropsWithChildren<{
@@ -136,6 +137,50 @@ test("should attempt to fetch authenticated media from the server", async () => 
   expect(globalThis.fetch).toBeCalledWith(expectedAuthUrl, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+});
+
+test("should attempt to use widget API if running as a widget", async () => {
+  const expectedMXCUrl = "mxc://example.org/alice-avatar";
+  const expectedObjectURL = "my-object-url";
+  const theBlob = new Blob([]);
+
+  // vitest doesn't have a implementation of create/revokeObjectURL, so we need
+  // to delete the property. It's a bit odd, but it works.
+  Reflect.deleteProperty(global.window.URL, "createObjectURL");
+  globalThis.URL.createObjectURL = vi.fn().mockReturnValue(expectedObjectURL);
+  Reflect.deleteProperty(global.window.URL, "revokeObjectURL");
+  globalThis.URL.revokeObjectURL = vi.fn();
+
+  const client = vi.mocked<MatrixClient>({
+    getAccessToken: () => undefined,
+  } as unknown as MatrixClient);
+
+  widget!.api = { downloadFile: vi.fn() } as unknown as WidgetApi;
+  vi.spyOn(widget!.api, "downloadFile").mockResolvedValue({ file: theBlob });
+  const member = mockMatrixRoomMember(
+    mockRtcMembership("@alice:example.org", "AAAA"),
+    {
+      getMxcAvatarUrl: () => expectedMXCUrl,
+    },
+  );
+  const displayName = "Alice";
+  render(
+    <TestComponent client={client}>
+      <Avatar
+        id={member.userId}
+        name={displayName}
+        size={96}
+        src={member.getMxcAvatarUrl()}
+      />
+    </TestComponent>,
+  );
+
+  // Fetch is asynchronous, so wait for this to resolve.
+  await vi.waitUntil(() =>
+    document.querySelector(`img[src='${expectedObjectURL}']`),
+  );
+
+  expect(widget!.api.downloadFile).toBeCalledWith(expectedMXCUrl);
 });
 
 test("Supports download files as base64", async () => {
