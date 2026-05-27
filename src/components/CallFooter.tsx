@@ -222,6 +222,7 @@ export const CallFooter: FC<FooterProps> = ({
         key="raise_hand"
         className={styles.raiseHand}
         identifier={reactionIdentifier}
+        data-testid="incall_reactions"
       />,
     );
   }
