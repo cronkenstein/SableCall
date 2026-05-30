@@ -59,6 +59,10 @@ layer(compound);
 
   --call-view-overlay-layer: 1;
   --call-view-header-footer-layer: 2;
+  /* Space reserved below the reactions popup (call footer + optional host overlay). */
+  --call-reactions-popup-bottom-inset: calc(
+    env(safe-area-inset-bottom) + var(--cpd-space-10x) * 2 + 52px
+  );
 }
 
 :root,

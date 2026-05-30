@@ -18,19 +18,84 @@
   }
 }
 
-div.reactionPopupMenuRoot.reactionPopupMenuModal {
-  --overlay-top: 82vh;
-  width: fit-content;
-}
-
 div.reactionPopupMenuRoot {
-  /* Center the drawer */
+  z-index: calc(var(--call-view-header-footer-layer) + 1);
+  /* Center the drawer on wide viewports */
   --inset-inline: 30em;
 }
 
 .reactionPopupMenuRoot > div {
   width: fit-content;
   max-width: 100vw;
+}
+
+/* Desktop dialog: anchor the bottom edge above the call footer. */
+div.reactionPopupMenuRoot.reactionPopupMenuModal.overlay {
+  top: calc(100vh - var(--call-reactions-popup-bottom-inset));
+  left: 50%;
+  width: fit-content;
+  transform: translate(-50%, -100%);
+}
+
+div.reactionPopupMenuRoot.reactionPopupMenuModal.overlay.animate[data-state="open"] {
+  animation: reaction-popup-in 200ms;
+}
+
+div.reactionPopupMenuRoot.reactionPopupMenuModal.overlay.animate[data-state="closed"] {
+  animation: reaction-popup-out 130ms;
+}
+
+@keyframes reaction-popup-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% + 12px));
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -100%);
+  }
+}
+
+@keyframes reaction-popup-out {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -100%);
+  }
+
+  to {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% + 12px));
+  }
+}
+
+@media (prefers-reduced-motion) {
+  div.reactionPopupMenuRoot.reactionPopupMenuModal.overlay.animate[data-state="open"],
+  div.reactionPopupMenuRoot.reactionPopupMenuModal.overlay.animate[data-state="closed"] {
+    animation-name: reaction-popup-fade;
+  }
+}
+
+@keyframes reaction-popup-fade {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* Touchscreen drawer: sit above the footer instead of flush with the bottom edge. */
+div.reactionPopupMenuRoot.reactionPopupMenuDrawer {
+  inset-block-end: var(--call-reactions-popup-bottom-inset);
+  max-block-size: min(
+    70%,
+    calc(
+      100vh - var(--call-reactions-popup-bottom-inset) - env(safe-area-inset-top) -
+        var(--cpd-space-4x)
+    )
+  );
 }
 
 div.reactionPopupMenuRoot.reactionPopupMenuModal > div > div {
@@ -54,9 +119,9 @@ div.reactionPopupMenuRoot.reactionPopupMenuModal > div > div {
   padding: 0;
   flex-grow: 1;
   gap: var(--reaction-button-gap);
-  /* Height of 3 rows plus padding. */
+  /* Height of 4 rows plus padding — expanded picker has more reactions now. */
   max-height: calc(
-    ((var(--reaction-button-fontsize) + var(--cpd-separator-spacing)) * 2) * 3
+    ((var(--reaction-button-fontsize) + var(--cpd-separator-spacing)) * 2) * 4
   );
   max-width: calc(
     ((var(--reaction-button-fontsize) + var(--cpd-separator-spacing)) * 2) * 5
