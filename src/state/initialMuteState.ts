@@ -18,33 +18,25 @@ export function calculateInitialMuteState(
   skipLobby: boolean,
   callIntent: RTCCallIntent | undefined,
   isWidgetMode: boolean,
-  hostMediaPrefs?: { audioEnabled?: boolean; videoEnabled?: boolean },
 ): { audioEnabled: boolean; videoEnabled: boolean } {
   logger.debug(
-    `calculateInitialMuteState: skipLobby=${skipLobby}, callIntent=${callIntent} isWidgetMode=${isWidgetMode} hostAudio=${hostMediaPrefs?.audioEnabled} hostVideo=${hostMediaPrefs?.videoEnabled}`,
+    `calculateInitialMuteState: skipLobby=${skipLobby}, callIntent=${callIntent} isWidgetMode=${isWidgetMode}`,
   );
-
-  let defaults: { audioEnabled: boolean; videoEnabled: boolean };
 
   if (skipLobby && !isWidgetMode) {
     // If not in widget mode and lobby is skipped, default to muted to protect user privacy.
     // In the SPA context we don't want to unmute users without giving them a chance to adjust their settings first.
-    defaults = {
+    return {
       audioEnabled: false,
       videoEnabled: false,
     };
-  } else {
-    // Embedded contexts are trusted environments, so they allow unmuted by default.
-    // Same for when showing a lobby, as users can adjust their settings there.
-    // Additionally, if the call intent is "audio", we disable video by default.
-    defaults = {
-      audioEnabled: true,
-      videoEnabled: callIntent != "audio",
-    };
   }
 
+  // Embedded contexts are trusted environments, so they allow unmuted by default.
+  // Same for when showing a lobby, as users can adjust their settings there.
+  // Additionally, if the call intent is "audio", we disable video by default.
   return {
-    audioEnabled: hostMediaPrefs?.audioEnabled ?? defaults.audioEnabled,
-    videoEnabled: hostMediaPrefs?.videoEnabled ?? defaults.videoEnabled,
+    audioEnabled: true,
+    videoEnabled: callIntent != "audio",
   };
 }

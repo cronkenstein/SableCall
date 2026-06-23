@@ -70,14 +70,3 @@ test.each<{
     expect(videoEnabled).toBe(callIntent !== "audio");
   },
 );
-
-test("honours host-provided initial media state in widget mode", () => {
-  const { audioEnabled, videoEnabled } = calculateInitialMuteState(
-    true,
-    "video",
-    true,
-    { audioEnabled: false, videoEnabled: false },
-  );
-  expect(audioEnabled).toBe(false);
-  expect(videoEnabled).toBe(false);
-});

@@ -76,10 +76,6 @@ export const RoomPage: FC = (): ReactNode => {
           urlParams.skipLobby,
           urlParams.callIntent,
           widget !== null,
-          {
-            audioEnabled: urlParams.audioEnabled,
-            videoEnabled: urlParams.videoEnabled,
-          },
         ),
       ),
     );
