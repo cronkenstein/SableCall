@@ -240,6 +240,17 @@ export interface UrlConfiguration {
    */
   noiseSuppression?: boolean;
 
+  /**
+   * Initial microphone state when embedded in a host client (widget mode).
+   * When omitted, Element Call uses its default for the current context.
+   */
+  audioEnabled?: boolean;
+  /**
+   * Initial camera state when embedded in a host client (widget mode).
+   * When omitted, Element Call uses its default for the current context.
+   */
+  videoEnabled?: boolean;
+
   callIntent?: RTCCallIntent;
 }
 
@@ -485,6 +496,8 @@ export const computeUrlParams = (search = "", hash = ""): UrlParams => {
     autoLeaveWhenOthersLeft: parser.getFlag("autoLeave"),
     noiseSuppression: parser.getFlagParam("noiseSuppression", true),
     echoCancellation: parser.getFlagParam("echoCancellation", true),
+    audioEnabled: isWidget ? parser.getFlag("audioEnabled") : undefined,
+    videoEnabled: isWidget ? parser.getFlag("videoEnabled") : undefined,
   };
 
   // Log the final configuration for debugging purposes.
