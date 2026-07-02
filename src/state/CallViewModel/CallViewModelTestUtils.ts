@@ -249,6 +249,7 @@ export function withCallViewModel(mode: MatrixRTCMode) {
       new BehaviorSubject<ProcessorState>({
         processor: undefined,
         supported: undefined,
+        blurEnabled: false,
       }),
     );
 

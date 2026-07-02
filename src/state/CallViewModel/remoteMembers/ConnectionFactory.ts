@@ -152,7 +152,7 @@ function generateRoomOption({
   let videoCaptureDefaults = {
     ...liveKitOptions.videoCaptureDefaults,
     deviceId: devices.videoInput.selected$.value?.id,
-    processor: processorState.processor,
+    processor: processorState.blurEnabled ? processorState.processor : undefined,
   };
   let publishDefaults = liveKitOptions.publishDefaults;
 

@@ -76,6 +76,7 @@ beforeEach(() => {
     new BehaviorSubject<ProcessorState>({
       supported: true,
       processor: undefined,
+      blurEnabled: false,
     }),
     undefined,
     false,

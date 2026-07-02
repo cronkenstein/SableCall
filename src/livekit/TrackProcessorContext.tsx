@@ -34,9 +34,12 @@ import { type ObservableScope } from "../state/ObservableScope";
 // it is a combination of exposing observable and react hooks.
 // preferably we should not make this a context anymore and instead just a vm?
 
+const BLUR_RADIUS = 15;
+
 export type ProcessorState = {
   supported: boolean | undefined;
   processor: undefined | ProcessorWrapper<BackgroundOptions>;
+  blurEnabled: boolean;
 };
 
 const ProcessorContext = createContext<ProcessorState | undefined>(undefined);
@@ -65,6 +68,37 @@ export function useTrackProcessorObservable$(): Observable<ProcessorState> {
 }
 
 /**
+ * Keeps background blur in sync without tearing down the LiveKit processor pipeline.
+ * Disabling blur switches to passthrough mode instead of stopProcessor(), which avoids
+ * a black camera feed after toggling blur off.
+ */
+export async function syncVideoTrackProcessor(
+  videoTrack: LocalVideoTrack,
+  processorState: ProcessorState,
+): Promise<void> {
+  const { processor, blurEnabled } = processorState;
+  if (!processor) return;
+
+  if (blurEnabled) {
+    if (!videoTrack.getProcessor()) {
+      await videoTrack.setProcessor(processor);
+    }
+    await processor.updateTransformerOptions({
+      backgroundDisabled: false,
+      blurRadius: BLUR_RADIUS,
+    });
+    return;
+  }
+
+  if (videoTrack.getProcessor() === processor) {
+    await processor.updateTransformerOptions({
+      backgroundDisabled: true,
+      blurRadius: BLUR_RADIUS,
+    });
+  }
+}
+
+/**
  * Updates your video tracks to always use the given processor.
  */
 export const trackProcessorSync = (
@@ -75,31 +109,26 @@ export const trackProcessorSync = (
   combineLatest([videoTrack$, processor$])
     .pipe(scope.bind())
     .subscribe(([videoTrack, processorState]) => {
-      if (!processorState) return;
-      if (!videoTrack) return;
-      const { processor } = processorState;
-      if (processor && !videoTrack.getProcessor()) {
-        void videoTrack.setProcessor(processor);
-      }
-      if (!processor && videoTrack.getProcessor()) {
-        void videoTrack.stopProcessor();
-      }
+      if (!processorState || !videoTrack) return;
+
+      void syncVideoTrackProcessor(videoTrack, processorState).catch((error) => {
+        console.error("Failed to sync video track processor", error);
+      });
     });
 };
 
 export const useTrackProcessorSync = (
   videoTrack: LocalVideoTrack | null,
 ): void => {
-  const { processor } = useTrackProcessor();
+  const processorState = useTrackProcessor();
+
   useEffect(() => {
     if (!videoTrack) return;
-    if (processor && !videoTrack.getProcessor()) {
-      void videoTrack.setProcessor(processor);
-    }
-    if (!processor && videoTrack.getProcessor()) {
-      void videoTrack.stopProcessor();
-    }
-  }, [processor, videoTrack]);
+
+    void syncVideoTrackProcessor(videoTrack, processorState).catch((error) => {
+      console.error("Failed to sync video track processor", error);
+    });
+  }, [processorState, videoTrack]);
 };
 
 interface Props {
@@ -107,23 +136,25 @@ interface Props {
 }
 
 export const ProcessorProvider: FC<Props> = ({ children }) => {
-  // The setting the user wants to have
   const [blurActivated] = useSetting(backgroundBlurSettings);
   const supported = useMemo(() => supportsBackgroundProcessors(), []);
   const blur = useMemo(
     () =>
       new ProcessorWrapper(
-        new BlurBackgroundTransformer({ blurRadius: 15 }),
+        new BlurBackgroundTransformer({
+          blurRadius: BLUR_RADIUS,
+          backgroundDisabled: true,
+        }),
         "background-blur",
       ),
     [],
   );
 
-  // This is the actual state exposed through the context
   const processorState = useMemo(
     () => ({
       supported,
-      processor: supported && blurActivated ? blur : undefined,
+      processor: supported ? blur : undefined,
+      blurEnabled: supported && blurActivated,
     }),
     [supported, blurActivated, blur],
   );

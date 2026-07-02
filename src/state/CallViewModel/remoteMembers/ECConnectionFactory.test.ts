@@ -83,6 +83,7 @@ describe("ECConnectionFactory - Audio inputs options", () => {
         new BehaviorSubject<ProcessorState>({
           supported: true,
           processor: undefined,
+          blurEnabled: false,
         }),
         undefined,
         false,
@@ -131,6 +132,7 @@ describe("ECConnectionFactory - ControlledAudioDevice", () => {
         new BehaviorSubject<ProcessorState>({
           supported: true,
           processor: undefined,
+          blurEnabled: false,
         }),
         undefined,
         controlled,
@@ -166,6 +168,7 @@ describe("ECConnectionFactory - Camera quality settings", () => {
       new BehaviorSubject<ProcessorState>({
         supported: true,
         processor: undefined,
+        blurEnabled: false,
       }),
       undefined,
       false,
@@ -203,6 +206,7 @@ describe("ECConnectionFactory - Camera quality settings", () => {
       new BehaviorSubject<ProcessorState>({
         supported: true,
         processor: undefined,
+        blurEnabled: false,
       }),
       undefined,
       false,
@@ -241,6 +245,7 @@ describe("ECConnectionFactory - Camera quality settings", () => {
       new BehaviorSubject<ProcessorState>({
         supported: true,
         processor: undefined,
+        blurEnabled: false,
       }),
       undefined,
       false,

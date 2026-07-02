@@ -220,6 +220,7 @@ describe("LocalMembership", () => {
     trackProcessorState$: constant({
       supported: false,
       processor: undefined,
+      blurEnabled: false,
     }),
     logger: logger,
     createPublisherFactory: vi.fn(),

@@ -210,7 +210,7 @@ describe("Publisher", () => {
       connection,
       mockMediaDevices({}),
       muteStates,
-      constant({ supported: false, processor: undefined }),
+      constant({ supported: false, processor: undefined, blurEnabled: false }),
       logger,
     );
   });
@@ -327,7 +327,7 @@ describe("Publisher", () => {
         connection,
         mockMediaDevices({}),
         muteStates,
-        constant({ supported: false, processor: undefined }),
+        constant({ supported: false, processor: undefined, blurEnabled: false }),
         logger,
       );
     });
@@ -508,7 +508,7 @@ describe("Publisher", () => {
         connection,
         mockMediaDevices({}),
         muteStates,
-        constant({ supported: false, processor: undefined }),
+        constant({ supported: false, processor: undefined, blurEnabled: false }),
         logger,
       );
       const micTrack = createMockLocalTrack(
@@ -658,7 +658,7 @@ describe("Bug fix", () => {
       connection,
       mockMediaDevices({}),
       muteStates,
-      constant({ supported: false, processor: undefined }),
+      constant({ supported: false, processor: undefined, blurEnabled: false }),
       logger,
     );
     audioEnabled$.next(true);

@@ -169,7 +169,7 @@ export function getBasicCallViewModelEnvironment(
     },
     handRaisedSubject$,
     reactionsSubject$,
-    constant({ processor: undefined, supported: false }),
+    constant({ processor: undefined, supported: false, blurEnabled: false }),
   );
   return {
     vm,
