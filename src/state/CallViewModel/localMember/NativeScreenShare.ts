@@ -6,6 +6,7 @@ Please see LICENSE in the repository root for full details.
 */
 
 import {
+  AudioPresets,
   Track,
   type LocalParticipant,
   type TrackPublishOptions,
@@ -687,10 +688,18 @@ export class NativeScreenShareManager {
       videoPublishOptions(payload.frameRate),
     );
     if (session.audioTrack) {
+      const stereo = (payload.channels > 0 ? payload.channels : 2) >= 2;
       await participant.publishTrack(session.audioTrack, {
         source: Track.Source.ScreenShareAudio,
         dtx: false,
         red: false,
+        // LiveKit's stereo auto-detection reads getSettings().channelCount,
+        // which synthesized (destination-node) tracks may not report in
+        // WKWebView; without this, stereo system audio downmixes to mono.
+        forceStereo: stereo,
+        // Default is music (48kbps mono-oriented); media content deserves
+        // the stereo preset.
+        audioPreset: stereo ? AudioPresets.musicStereo : AudioPresets.music,
       });
     }
     session.published = true;
