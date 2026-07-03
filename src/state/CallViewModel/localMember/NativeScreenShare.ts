@@ -19,9 +19,11 @@ import { ElementWidgetActions, widget } from "../../../widget.ts";
 import { getUrlParams } from "../../../UrlParams.ts";
 import {
   advancedScreenShare,
+  parseResolution,
   screenShareBitrate,
   screenShareCodec,
   screenShareFramerate,
+  screenShareResolution,
 } from "../../../settings/settings.ts";
 import { Config } from "../../../config/Config.ts";
 
@@ -50,6 +52,7 @@ import { Config } from "../../../config/Config.ts";
 const MSG_VIDEO = 0x01;
 const MSG_AUDIO = 0x02;
 const VIDEO_CODEC_JPEG = 0x01;
+const VIDEO_CODEC_H264 = 0x02;
 const AUDIO_FORMAT_F32 = 0x01;
 const VIDEO_HEADER_LEN = 14;
 const AUDIO_HEADER_LEN = 16;
@@ -75,6 +78,8 @@ interface NativeScreenShareStartPayload {
   frameRate: number;
   sampleRate: number;
   channels: number;
+  /** Wire codec chosen by the host ("h264" or "jpeg"); informational. */
+  codec?: string;
 }
 
 /**
@@ -298,6 +303,7 @@ const MEDIA_WORKER = `
 const MSG_VIDEO = ${MSG_VIDEO};
 const MSG_AUDIO = ${MSG_AUDIO};
 const VIDEO_CODEC_JPEG = ${VIDEO_CODEC_JPEG};
+const VIDEO_CODEC_H264 = ${VIDEO_CODEC_H264};
 const AUDIO_FORMAT_F32 = ${AUDIO_FORMAT_F32};
 const VIDEO_HEADER_LEN = ${VIDEO_HEADER_LEN};
 const AUDIO_HEADER_LEN = ${AUDIO_HEADER_LEN};
@@ -308,6 +314,8 @@ let generatorTrack = null;
 let audioPort = null;
 let pendingVideo = null;
 let decoding = false;
+let videoDecoder = null;
+let pendingWrite = false;
 // SCK timestamps are host-clock microseconds (huge absolute values);
 // rebase to zero so the encoder sees a sane, monotonic timeline.
 let baseTimestamp = null;
@@ -358,10 +366,14 @@ function onMedia(buffer) {
   switch (view.getUint8(0)) {
     case MSG_VIDEO: {
       if (buffer.byteLength <= VIDEO_HEADER_LEN) return;
-      if (view.getUint8(1) !== VIDEO_CODEC_JPEG) return;
-      // Latest wins: only the most recent undecoded frame is kept.
-      pendingVideo = buffer;
-      drainVideo();
+      const codec = view.getUint8(1);
+      if (codec === VIDEO_CODEC_H264) {
+        handleH264(buffer, view);
+      } else if (codec === VIDEO_CODEC_JPEG) {
+        // Latest wins: only the most recent undecoded frame is kept.
+        pendingVideo = buffer;
+        drainVideo();
+      }
       break;
     }
     case MSG_AUDIO: {
@@ -381,6 +393,112 @@ function onMedia(buffer) {
   }
 }
 
+function rebaseTimestamp(view) {
+  const raw = Number(view.getBigUint64(6, true));
+  if (baseTimestamp === null) baseTimestamp = raw;
+  return Math.max(0, raw - baseTimestamp);
+}
+
+// Walks Annex B start codes; cb(nalType, payloadOffset) returns true to stop.
+function forEachNal(data, cb) {
+  let i = 0;
+  while (i + 3 < data.length) {
+    if (data[i] === 0 && data[i + 1] === 0) {
+      let start = -1;
+      if (data[i + 2] === 1) start = i + 3;
+      else if (data[i + 2] === 0 && data[i + 3] === 1) start = i + 4;
+      if (start > 0 && start < data.length) {
+        if (cb(data[start] & 0x1f, start)) return;
+        i = start;
+        continue;
+      }
+    }
+    i++;
+  }
+}
+
+function disposeDecoder() {
+  if (videoDecoder) {
+    try { videoDecoder.close(); } catch (e) {}
+    videoDecoder = null;
+  }
+}
+
+async function onDecodedFrame(frame) {
+  if (writer) {
+    if (pendingWrite) {
+      // Latest-wins after decode: never queue stale frames behind a slow sink.
+      frame.close();
+      return;
+    }
+    pendingWrite = true;
+    try {
+      await writer.write(frame);
+    } catch (e) {
+      // Sink gone (teardown); frame ownership passed regardless.
+    } finally {
+      pendingWrite = false;
+    }
+  } else {
+    try {
+      const bitmap = await createImageBitmap(frame);
+      self.postMessage(
+        { type: "bitmap", bitmap, width: frame.displayWidth, height: frame.displayHeight },
+        [bitmap],
+      );
+    } catch (e) {}
+    frame.close();
+  }
+}
+
+function handleH264(buffer, view) {
+  const timestamp = rebaseTimestamp(view);
+  const payload = new Uint8Array(buffer, VIDEO_HEADER_LEN);
+  let isKey = false;
+  let spsOffset = -1;
+  forEachNal(payload, (type, offset) => {
+    if (type === 5) isKey = true;
+    if (type === 7 && spsOffset < 0) spsOffset = offset;
+    return isKey && spsOffset >= 0;
+  });
+
+  if (!videoDecoder) {
+    // Configuration comes from the bitstream: wait for a keyframe whose
+    // in-band SPS yields the codec string (profile/constraints/level).
+    if (!isKey || spsOffset < 0 || spsOffset + 3 >= payload.length) return;
+    const codec =
+      "avc1." +
+      [1, 2, 3]
+        .map((i) => payload[spsOffset + i].toString(16).padStart(2, "0"))
+        .join("");
+    try {
+      videoDecoder = new VideoDecoder({
+        output: onDecodedFrame,
+        // On error, drop the decoder; the next keyframe (<=2s) rebuilds it.
+        error: () => disposeDecoder(),
+      });
+      videoDecoder.configure({ codec, optimizeForLatency: true });
+    } catch (e) {
+      disposeDecoder();
+      return;
+    }
+  }
+
+  // Backlogged decoder: skip deltas and resync on the next keyframe.
+  if (videoDecoder.decodeQueueSize > 8 && !isKey) return;
+  try {
+    videoDecoder.decode(
+      new EncodedVideoChunk({
+        type: isKey ? "key" : "delta",
+        timestamp,
+        data: payload,
+      }),
+    );
+  } catch (e) {
+    disposeDecoder();
+  }
+}
+
 async function drainVideo() {
   if (decoding) return;
   decoding = true;
@@ -391,9 +509,7 @@ async function drainVideo() {
       const view = new DataView(buffer);
       const width = view.getUint16(2, true);
       const height = view.getUint16(4, true);
-      const rawTimestamp = Number(view.getBigUint64(6, true));
-      if (baseTimestamp === null) baseTimestamp = rawTimestamp;
-      const timestamp = Math.max(0, rawTimestamp - baseTimestamp);
+      const timestamp = rebaseTimestamp(view);
       try {
         const bitmap = await createImageBitmap(
           new Blob([buffer.slice(VIDEO_HEADER_LEN)], { type: "image/jpeg" }),
@@ -417,6 +533,7 @@ async function drainVideo() {
 
 function cleanup() {
   try { if (ws) ws.close(); } catch (_) {}
+  disposeDecoder();
   try { if (writer) writer.close(); } catch (_) {}
   ws = null;
   writer = null;
@@ -484,10 +601,23 @@ export class NativeScreenShareManager {
     this.logger.info(
       `Requesting native screen share toggle (sharing=${currentlySharing})`,
     );
+    const payload: Record<string, unknown> = {
+      sharing: currentlySharing,
+      // The host encodes H.264 (hardware) when we can decode it; JPEG is
+      // the mutual fallback.
+      videoCodecs:
+        typeof VideoDecoder === "function" ? ["h264", "jpeg"] : ["jpeg"],
+    };
+    if (advancedScreenShare.getValue()) {
+      const { width, height } = parseResolution(
+        screenShareResolution.getValue(),
+      );
+      payload.maxWidth = width;
+      payload.maxHeight = height;
+      payload.frameRate = screenShareFramerate.getValue();
+    }
     widget?.api.transport
-      .send(ElementWidgetActions.ScreenShareToggleRequest, {
-        sharing: currentlySharing,
-      })
+      .send(ElementWidgetActions.ScreenShareToggleRequest, payload)
       .catch((e) => {
         this.logger.error("Failed to send screen share toggle request", e);
       });
@@ -548,7 +678,7 @@ export class NativeScreenShareManager {
       throw new Error("Invalid native screen share start payload");
     }
     this.logger.info(
-      `Starting native screen share ${payload.width}x${payload.height}@${payload.frameRate}`,
+      `Starting native screen share ${payload.width}x${payload.height}@${payload.frameRate} (${payload.codec ?? "jpeg"})`,
     );
 
     // Audio graph first, so its MessagePort can be handed to the worker.
