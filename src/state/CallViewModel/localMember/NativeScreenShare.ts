@@ -55,60 +55,106 @@ export function isNativeScreenShareMode(): boolean {
 /**
  * Audio sink worklet: consumes interleaved f32 PCM chunks posted from the
  * main thread and plays them out, deinterleaving into the output channels.
- * Keeps a small prebuffer to ride out network jitter and drops the oldest
- * chunks if the host outpaces playback.
+ *
+ * This is a small adaptive jitter buffer. Latency must stay bounded for the
+ * whole share, so beyond a ~60ms prebuffer it:
+ *
+ * - resamples via linear interpolation at chunkRate / contextRate, which
+ *   also absorbs an AudioContext that did not honor the requested rate;
+ * - nudges the playback rate ±2% based on buffer fill, so slow clock drift
+ *   between the capture side and the audio device never accumulates;
+ * - hard-drops the oldest chunks back to ~120ms whenever the buffer exceeds
+ *   ~300ms (e.g. after the tab was starved), trading a click for latency;
+ * - re-enters prebuffering after an underrun instead of inserting silence
+ *   into the middle of the stream, which would permanently add delay.
  */
 const AUDIO_SINK_WORKLET = `
+const PREBUFFER_SEC = 0.06;
+const TARGET_SEC = 0.12;
+const MAX_SEC = 0.3;
+const DRIFT_GAIN = 0.15;
+const MAX_RATE_NUDGE = 0.02;
+
 class NativeScreenShareSink extends AudioWorkletProcessor {
   constructor() {
     super();
     this.chunks = [];
-    this.readFrame = 0;
-    this.queuedFrames = 0;
+    // Fractional read position (in source frames) within chunks[0].
+    this.readPos = 0;
     this.started = false;
-    // ~60ms prebuffer, ~1s overflow cap (sampleRate is a worklet global).
-    this.prebufferFrames = Math.round(sampleRate * 0.06);
-    this.maxQueuedFrames = sampleRate;
     this.port.onmessage = (event) => {
       const chunk = event.data;
       if (!chunk || !(chunk.samples instanceof Float32Array) || !chunk.channels) return;
+      chunk.rate = chunk.rate > 0 ? chunk.rate : 48000;
+      chunk.frames = chunk.samples.length / chunk.channels;
+      if (chunk.frames < 1) return;
       this.chunks.push(chunk);
-      this.queuedFrames += chunk.samples.length / chunk.channels;
-      while (this.queuedFrames > this.maxQueuedFrames && this.chunks.length > 1) {
-        const dropped = this.chunks.shift();
-        const droppedFrames = dropped.samples.length / dropped.channels - this.readFrame;
-        this.readFrame = 0;
-        this.queuedFrames -= droppedFrames;
+      // Latency clamp: if the buffer ballooned, drop oldest audio down to
+      // the target rather than letting the delay persist forever.
+      if (this.bufferedSeconds() > MAX_SEC) {
+        while (this.chunks.length > 1 && this.bufferedSeconds() > TARGET_SEC) {
+          this.chunks.shift();
+          this.readPos = 0;
+        }
       }
     };
+  }
+
+  bufferedSeconds() {
+    let seconds = 0;
+    for (let i = 0; i < this.chunks.length; i++) {
+      const chunk = this.chunks[i];
+      const remaining = i === 0 ? chunk.frames - this.readPos : chunk.frames;
+      seconds += remaining / chunk.rate;
+    }
+    return seconds;
   }
 
   process(inputs, outputs) {
     const output = outputs[0];
     if (!output || output.length === 0) return true;
     const frameCount = output[0].length;
+    const buffered = this.bufferedSeconds();
 
-    if (!this.started && this.queuedFrames < this.prebufferFrames) {
-      return true; // emit silence until the prebuffer fills
+    if (!this.started) {
+      if (buffered < PREBUFFER_SEC) return true; // silence while prebuffering
+      this.started = true;
     }
-    this.started = true;
+
+    // Steer buffer fill toward the target with a gentle, inaudible-ish
+    // playback rate adjustment; this is what cancels clock drift.
+    let nudge = 1 + DRIFT_GAIN * (buffered - TARGET_SEC);
+    if (nudge > 1 + MAX_RATE_NUDGE) nudge = 1 + MAX_RATE_NUDGE;
+    if (nudge < 1 - MAX_RATE_NUDGE) nudge = 1 - MAX_RATE_NUDGE;
 
     for (let frame = 0; frame < frameCount; frame++) {
       const chunk = this.chunks[0];
       if (!chunk) {
-        for (let ch = 0; ch < output.length; ch++) output[ch][frame] = 0;
-        continue;
+        // Underrun: emit silence and re-prebuffer. Resuming only once the
+        // buffer refills keeps the gap from becoming permanent delay.
+        this.started = false;
+        this.readPos = 0;
+        for (let ch = 0; ch < output.length; ch++) {
+          for (let rest = frame; rest < frameCount; rest++) output[ch][rest] = 0;
+        }
+        return true;
       }
+
       const channels = chunk.channels;
-      const base = this.readFrame * channels;
+      const i0 = Math.floor(this.readPos);
+      const i1 = Math.min(i0 + 1, chunk.frames - 1);
+      const t = this.readPos - i0;
       for (let ch = 0; ch < output.length; ch++) {
-        output[ch][frame] = chunk.samples[base + Math.min(ch, channels - 1)];
+        const src = Math.min(ch, channels - 1);
+        const a = chunk.samples[i0 * channels + src];
+        const b = chunk.samples[i1 * channels + src];
+        output[ch][frame] = a + (b - a) * t;
       }
-      this.readFrame++;
-      this.queuedFrames--;
-      if (this.readFrame * channels >= chunk.samples.length) {
+
+      this.readPos += (chunk.rate / sampleRate) * nudge;
+      while (this.chunks.length > 0 && this.readPos >= this.chunks[0].frames) {
+        this.readPos -= this.chunks[0].frames;
         this.chunks.shift();
-        this.readFrame = 0;
       }
     }
     return true;
@@ -300,6 +346,17 @@ export class NativeScreenShareManager {
       const destination = audioContext.createMediaStreamDestination();
       workletNode.connect(destination);
       if (audioContext.state === "suspended") await audioContext.resume();
+      // The worklet resamples by the per-chunk rate, so a mismatch here is
+      // handled — but it is worth knowing about when debugging latency.
+      if (audioContext.sampleRate !== payload.sampleRate) {
+        this.logger.warn(
+          `AudioContext runs at ${audioContext.sampleRate}Hz, capture at ${payload.sampleRate}Hz; worklet will resample`,
+        );
+      } else {
+        this.logger.info(
+          `AudioContext running at ${audioContext.sampleRate}Hz`,
+        );
+      }
       session.audioContext = audioContext;
       session.workletNode = workletNode;
       session.audioTrack = destination.stream.getAudioTracks()[0] ?? null;
@@ -362,12 +419,15 @@ export class NativeScreenShareManager {
         if (view.getUint8(1) !== AUDIO_FORMAT_F32) return;
         const channels = view.getUint8(2);
         if (channels < 1) return;
+        const rate = view.getUint32(4, true);
         const samples = new Float32Array(
           buffer,
           AUDIO_HEADER_LEN,
           (buffer.byteLength - AUDIO_HEADER_LEN) >> 2,
         );
-        session.workletNode.port.postMessage({ samples, channels }, [buffer]);
+        session.workletNode.port.postMessage({ samples, channels, rate }, [
+          buffer,
+        ]);
         break;
       }
       default:
