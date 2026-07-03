@@ -240,6 +240,14 @@ export interface UrlConfiguration {
    */
   noiseSuppression?: boolean;
 
+  /**
+   * Whether screen sharing is provided natively by the hosting client
+   * (macOS Tauri: ScreenCaptureKit → localhost media bridge) instead of
+   * getDisplayMedia. Toggling screen share then goes through the
+   * io.sable.screen_share.* widget actions.
+   */
+  nativeScreenShare?: boolean;
+
   callIntent?: RTCCallIntent;
 }
 
@@ -485,6 +493,7 @@ export const computeUrlParams = (search = "", hash = ""): UrlParams => {
     autoLeaveWhenOthersLeft: parser.getFlag("autoLeave"),
     noiseSuppression: parser.getFlagParam("noiseSuppression", true),
     echoCancellation: parser.getFlagParam("echoCancellation", true),
+    nativeScreenShare: parser.getFlag("nativeScreenShare"),
   };
 
   // Log the final configuration for debugging purposes.

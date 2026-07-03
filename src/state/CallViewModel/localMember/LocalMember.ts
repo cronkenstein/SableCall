@@ -26,9 +26,11 @@ import {
   catchError,
   combineLatest,
   distinctUntilChanged,
+  finalize,
   from,
   fromEvent,
   map,
+  NEVER,
   type Observable,
   of,
   pairwise,
@@ -72,6 +74,10 @@ import {
 import { type HomeserverConnected } from "./HomeserverConnected.ts";
 import { type LocalTransport } from "./LocalTransport.ts";
 import { areLivekitTransportsEqual } from "../remoteMembers/MatrixLivekitMembers.ts";
+import {
+  isNativeScreenShareMode,
+  NativeScreenShareManager,
+} from "./NativeScreenShare.ts";
 
 export enum TransportState {
   /** Not even a transport is available to the LocalMembership */
@@ -709,7 +715,22 @@ export const createLocalMembership$ = ({
   );
 
   let toggleScreenSharing: (() => void) | null = null;
-  if (
+  if (isNativeScreenShareMode()) {
+    // macOS Tauri: WKWebView's getDisplayMedia is video-only, so capture is
+    // delegated to the hosting client via widget actions and the resulting
+    // media republished here. See NativeScreenShare.ts.
+    const nativeScreenShare = new NativeScreenShareManager(
+      participant$,
+      logger,
+    );
+    NEVER.pipe(
+      scope.bind(),
+      finalize(() => nativeScreenShare.dispose()),
+    ).subscribe();
+    toggleScreenSharing = (): void => {
+      nativeScreenShare.requestToggle(sharingScreen$.value);
+    };
+  } else if (
     "getDisplayMedia" in (navigator.mediaDevices ?? {}) &&
     !getUrlParams().hideScreensharing
   ) {

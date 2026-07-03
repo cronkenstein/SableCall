@@ -44,6 +44,19 @@ export enum ElementWidgetActions {
   //   video_enabled?: boolean
   // }
   DeviceMute = "io.element.device_mute",
+  // Native screen share bridge (macOS Tauri host). The host runs
+  // ScreenCaptureKit capture and a localhost media WebSocket; the widget
+  // publishes the resulting tracks. Mirrored in Sable's
+  // src/app/plugins/call/types.ts.
+  //
+  // fromWidget: request the host to toggle native capture ({ sharing }).
+  ScreenShareToggleRequest = "io.sable.screen_share.toggle_request",
+  // toWidget: capture started; connect and publish ({ wsUrl, token, ... }).
+  ScreenShareStart = "io.sable.screen_share.start",
+  // toWidget: capture stopped; unpublish and clean up.
+  ScreenShareStop = "io.sable.screen_share.stop",
+  // fromWidget: report publish state changes/errors ({ active, error }).
+  ScreenShareStatus = "io.sable.screen_share.status",
 }
 
 export interface JoinCallData {
@@ -114,6 +127,8 @@ export const initializeWidget = (
         ElementWidgetActions.JoinCall,
         ElementWidgetActions.HangupCall,
         ElementWidgetActions.DeviceMute,
+        ElementWidgetActions.ScreenShareStart,
+        ElementWidgetActions.ScreenShareStop,
       ].forEach((action) => {
         api.on(`action:${action}`, (ev: CustomEvent<IWidgetApiRequest>) => {
           ev.preventDefault();
