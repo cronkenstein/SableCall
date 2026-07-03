@@ -206,6 +206,11 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     this.tail = [0, 0];
     this.lastOut = [0, 0];
     this.discontinuity = false;
+    // Observability heartbeat (5s of output frames).
+    this.statUnderruns = 0;
+    this.statClampDrops = 0;
+    this.statChunks = 0;
+    this.statFrames = 0;
     this.port.onmessage = (event) => {
       const data = event.data;
       if (data && data.port) {
@@ -222,6 +227,7 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     chunk.rate = chunk.rate > 0 ? chunk.rate : 48000;
     chunk.frames = chunk.samples.length / chunk.channels;
     if (chunk.frames < 1) return;
+    this.statChunks++;
     this.chunks.push(chunk);
     // Safety clamp for a single huge backlog burst (e.g. delivery resumed
     // after a long stall). Ordinary cadence peaks are left alone — the
@@ -231,11 +237,13 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
         this.chunks.shift();
         this.readPos = 0;
       }
+      this.statClampDrops++;
       this.discontinuity = true;
     }
   }
 
   dropOldest(seconds) {
+    this.statClampDrops++;
     let remaining = seconds;
     while (remaining > 0 && this.chunks.length > 1) {
       const chunk = this.chunks[0];
@@ -334,6 +342,7 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
         // worse than temporarily elevated latency.
         this.started = false;
         this.readPos = 0;
+        this.statUnderruns++;
         this.targetSec = Math.min(MAX_TARGET_SEC, this.targetSec + TARGET_STEP_SEC);
         this.windowFrames = 0;
         this.troughSec = Infinity;
@@ -369,6 +378,22 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
         this.chunks.shift();
       }
     }
+
+    this.statFrames += frameCount;
+    if (this.statFrames >= sampleRate * 5) {
+      this.port.postMessage({
+        type: "stats",
+        chunks: this.statChunks,
+        underruns: this.statUnderruns,
+        clampDrops: this.statClampDrops,
+        targetMs: Math.round(this.targetSec * 1000),
+        bufferedMs: Math.round(buffered * 1000),
+      });
+      this.statChunks = 0;
+      this.statUnderruns = 0;
+      this.statClampDrops = 0;
+      this.statFrames = 0;
+    }
     return true;
   }
 }
@@ -403,6 +428,25 @@ let pendingWrite = false;
 // SCK timestamps are host-clock microseconds (huge absolute values);
 // rebase to zero so the encoder sees a sane, monotonic timeline.
 let baseTimestamp = null;
+
+// Observability heartbeat: 5s deltas posted to the main thread. A stalled
+// heartbeat is itself a signal — it means this worker stopped being
+// scheduled entirely.
+let stats = { video: 0, audio: 0, decoded: 0, written: 0, writeDropped: 0, bitmaps: 0, decodeErrors: 0 };
+const statsTimer = setInterval(() => {
+  self.postMessage({
+    type: "stats",
+    video: stats.video,
+    audio: stats.audio,
+    decoded: stats.decoded,
+    written: stats.written,
+    writeDropped: stats.writeDropped,
+    bitmaps: stats.bitmaps,
+    decodeErrors: stats.decodeErrors,
+    queue: videoDecoder ? videoDecoder.decodeQueueSize : -1,
+  });
+  stats = { video: 0, audio: 0, decoded: 0, written: 0, writeDropped: 0, bitmaps: 0, decodeErrors: 0 };
+}, 5000);
 
 self.onmessage = (event) => {
   const msg = event.data;
@@ -451,6 +495,7 @@ function onMedia(buffer) {
     case MSG_VIDEO: {
       if (buffer.byteLength <= VIDEO_HEADER_LEN) return;
       const codec = view.getUint8(1);
+      stats.video++;
       if (codec === VIDEO_CODEC_H264) {
         handleH264(buffer, view);
       } else if (codec === VIDEO_CODEC_JPEG) {
@@ -471,6 +516,7 @@ function onMedia(buffer) {
         AUDIO_HEADER_LEN,
         (buffer.byteLength - AUDIO_HEADER_LEN) >> 2,
       );
+      stats.audio++;
       audioPort.postMessage({ samples, channels, rate }, [buffer]);
       break;
     }
@@ -503,21 +549,25 @@ function forEachNal(data, cb) {
 
 function disposeDecoder() {
   if (videoDecoder) {
+    stats.decodeErrors++;
     try { videoDecoder.close(); } catch (e) {}
     videoDecoder = null;
   }
 }
 
 async function onDecodedFrame(frame) {
+  stats.decoded++;
   if (writer) {
     if (pendingWrite) {
       // Latest-wins after decode: never queue stale frames behind a slow sink.
+      stats.writeDropped++;
       frame.close();
       return;
     }
     pendingWrite = true;
     try {
       await writer.write(frame);
+      stats.written++;
     } catch (e) {
       // Sink gone (teardown); frame ownership passed regardless.
     } finally {
@@ -526,6 +576,7 @@ async function onDecodedFrame(frame) {
   } else {
     try {
       const bitmap = await createImageBitmap(frame);
+      stats.bitmaps++;
       self.postMessage(
         { type: "bitmap", bitmap, width: frame.displayWidth, height: frame.displayHeight },
         [bitmap],
@@ -616,6 +667,7 @@ async function drainVideo() {
 }
 
 function cleanup() {
+  clearInterval(statsTimer);
   try { if (ws) ws.close(); } catch (_) {}
   disposeDecoder();
   try { if (writer) writer.close(); } catch (_) {}
@@ -636,9 +688,22 @@ interface MediaWorkerBitmapMessage {
   height: number;
 }
 
+interface MediaWorkerStatsMessage {
+  type: "stats";
+  video: number;
+  audio: number;
+  decoded: number;
+  written: number;
+  writeDropped: number;
+  bitmaps: number;
+  decodeErrors: number;
+  queue: number;
+}
+
 type MediaWorkerMessage =
   | MediaWorkerReadyMessage
   | MediaWorkerBitmapMessage
+  | MediaWorkerStatsMessage
   | { type: "closed" }
   | { type: "socket-error" };
 
@@ -812,6 +877,25 @@ export class NativeScreenShareManager {
       const channel = new MessageChannel();
       workletNode.port.postMessage({ port: channel.port1 }, [channel.port1]);
       workerAudioPort = channel.port2;
+      // The worklet reports its jitter-buffer heartbeat on the node port.
+      workletNode.port.onmessage = (event: MessageEvent): void => {
+        const data = event.data as
+          | {
+              type?: string;
+              chunks?: number;
+              underruns?: number;
+              clampDrops?: number;
+              targetMs?: number;
+              bufferedMs?: number;
+            }
+          | undefined;
+        if (data?.type === "stats") {
+          this.logger.info(
+            `audio sink 5s: chunks=${data.chunks} underruns=${data.underruns} ` +
+              `drops=${data.clampDrops} target=${data.targetMs}ms buf=${data.bufferedMs}ms`,
+          );
+        }
+      };
       audioTrack = destination.stream.getAudioTracks()[0] ?? null;
     } catch (e) {
       this.logger.error(
@@ -982,6 +1066,14 @@ export class NativeScreenShareManager {
         ).requestFrame?.();
         break;
       }
+      case "stats":
+        // Mirrors the host-side heartbeat: recv counts show what crossed
+        // the socket; decode/write counts show what survived this process.
+        this.logger.info(
+          `bridge 5s: recv v=${msg.video} a=${msg.audio} | decoded=${msg.decoded} q=${msg.queue} ` +
+            `decErr=${msg.decodeErrors} | written=${msg.written} wDrop=${msg.writeDropped} bmp=${msg.bitmaps}`,
+        );
+        break;
       case "closed":
         this.logger.info("Native screen share media socket closed");
         void this.stop();
