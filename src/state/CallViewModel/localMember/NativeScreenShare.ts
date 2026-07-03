@@ -58,12 +58,35 @@ const VIDEO_HEADER_LEN = 14;
 const AUDIO_HEADER_LEN = 16;
 
 /**
- * Jitter buffer tuning. The share-side audio budget is 80ms: the buffer
- * steers toward TARGET_SEC and hard-drops back to it above MAX_SEC.
+ * Jitter buffer tuning. Steady-state stays inside the 80ms share-side
+ * budget (base target 55ms), but the target adapts upward when delivery
+ * turns bursty (fullscreen/WindowServer contention on the capture side):
+ * each underrun grows the target, sustained clean playback decays it back.
+ * Audible gaps are worse than temporarily elevated latency.
  */
-const PREBUFFER_SEC = 0.04;
-const TARGET_SEC = 0.055;
-const MAX_SEC = 0.08;
+const BASE_TARGET_SEC = 0.055;
+const MAX_TARGET_SEC = 0.16;
+/** Immediate target growth on an actual underrun. */
+const TARGET_STEP_SEC = 0.03;
+/**
+ * Trough-based adaptation: the buffer level oscillates with delivery
+ * cadence, so the windowed minimum — not the instantaneous level — decides
+ * whether latency headroom is sufficient. Grow before underruns happen,
+ * decay only while the trough is provably safe.
+ */
+const TROUGH_WINDOW_SEC = 0.5;
+const TROUGH_LOW_SEC = 0.02;
+const TROUGH_SAFE_SEC = 0.04;
+const TROUGH_GROW_PAD_SEC = 0.01;
+const TARGET_DECAY_PER_WINDOW_SEC = 0.002;
+/**
+ * Latency removal is trough-based: transient peaks are part of a bursty
+ * cadence and must not be clipped (that starves the next inter-burst gap),
+ * but a trough persistently above target is real, removable delay.
+ */
+const TROUGH_EXCESS_SEC = 0.03;
+/** Absolute safety: a single huge backlog burst is cut down immediately. */
+const HARD_CLAMP_SEC = 0.24;
 const DRIFT_GAIN = 0.4;
 const MAX_RATE_NUDGE = 0.02;
 /** Fade-in time after a discontinuity, and decay constant for the old tail. */
@@ -148,9 +171,16 @@ function videoPublishOptions(frameRate: number): TrackPublishOptions {
  * produce a soft thump instead of a sharp click.
  */
 const AUDIO_SINK_WORKLET = `
-const PREBUFFER_SEC = ${PREBUFFER_SEC};
-const TARGET_SEC = ${TARGET_SEC};
-const MAX_SEC = ${MAX_SEC};
+const BASE_TARGET_SEC = ${BASE_TARGET_SEC};
+const MAX_TARGET_SEC = ${MAX_TARGET_SEC};
+const TARGET_STEP_SEC = ${TARGET_STEP_SEC};
+const TROUGH_WINDOW_SEC = ${TROUGH_WINDOW_SEC};
+const TROUGH_LOW_SEC = ${TROUGH_LOW_SEC};
+const TROUGH_SAFE_SEC = ${TROUGH_SAFE_SEC};
+const TROUGH_GROW_PAD_SEC = ${TROUGH_GROW_PAD_SEC};
+const TARGET_DECAY_PER_WINDOW_SEC = ${TARGET_DECAY_PER_WINDOW_SEC};
+const TROUGH_EXCESS_SEC = ${TROUGH_EXCESS_SEC};
+const HARD_CLAMP_SEC = ${HARD_CLAMP_SEC};
 const DRIFT_GAIN = ${DRIFT_GAIN};
 const MAX_RATE_NUDGE = ${MAX_RATE_NUDGE};
 
@@ -161,6 +191,11 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     // Fractional read position (in source frames) within chunks[0].
     this.readPos = 0;
     this.started = false;
+    // Adaptive latency target: grows on underruns and thin troughs,
+    // decays only while the windowed trough is safely above zero.
+    this.targetSec = BASE_TARGET_SEC;
+    this.troughSec = Infinity;
+    this.windowFrames = 0;
     this.gain = 0;
     this.gainStep = 1 / (${FADE_SEC} * sampleRate);
     this.tailDecay = Math.exp(-1 / (${TAIL_TAU_SEC} * sampleRate));
@@ -184,15 +219,29 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     chunk.frames = chunk.samples.length / chunk.channels;
     if (chunk.frames < 1) return;
     this.chunks.push(chunk);
-    // Latency clamp: never let the share-side buffer exceed MAX_SEC; drop
-    // the oldest audio back to target instead of accumulating delay.
-    if (this.bufferedSeconds() > MAX_SEC) {
-      while (this.chunks.length > 1 && this.bufferedSeconds() > TARGET_SEC) {
+    // Safety clamp for a single huge backlog burst (e.g. delivery resumed
+    // after a long stall). Ordinary cadence peaks are left alone — the
+    // trough logic in process() decides what latency is truly removable.
+    if (this.bufferedSeconds() > HARD_CLAMP_SEC) {
+      while (this.chunks.length > 1 && this.bufferedSeconds() > this.targetSec) {
         this.chunks.shift();
         this.readPos = 0;
       }
       this.discontinuity = true;
     }
+  }
+
+  dropOldest(seconds) {
+    let remaining = seconds;
+    while (remaining > 0 && this.chunks.length > 1) {
+      const chunk = this.chunks[0];
+      const chunkSeconds = (chunk.frames - this.readPos) / chunk.rate;
+      if (chunkSeconds > remaining) break;
+      remaining -= chunkSeconds;
+      this.chunks.shift();
+      this.readPos = 0;
+    }
+    this.discontinuity = true;
   }
 
   bufferedSeconds() {
@@ -223,16 +272,10 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     if (!output || output.length === 0) return true;
     const frameCount = output[0].length;
 
-    if (this.discontinuity) {
-      // Crossfade over the jump: old audio decays, new audio fades in.
-      this.discontinuity = false;
-      this.gain = 0;
-      for (let ch = 0; ch < output.length; ch++) this.tail[ch] = this.lastOut[ch];
-    }
-
     const buffered = this.bufferedSeconds();
     if (!this.started) {
-      if (buffered < PREBUFFER_SEC) {
+      // Prebuffer up to the adaptive target before (re)starting.
+      if (buffered < this.targetSec) {
         this.emitTail(output, 0, frameCount);
         return true;
       }
@@ -240,19 +283,56 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
       this.gain = 0;
     }
 
+    // Trough tracking: adapt the target to the delivery cadence actually
+    // observed, before it produces an audible underrun.
+    this.troughSec = Math.min(this.troughSec, buffered);
+    this.windowFrames += frameCount;
+    if (this.windowFrames >= sampleRate * TROUGH_WINDOW_SEC) {
+      if (this.troughSec < TROUGH_LOW_SEC) {
+        this.targetSec = Math.min(
+          MAX_TARGET_SEC,
+          this.targetSec + (TROUGH_LOW_SEC - this.troughSec) + TROUGH_GROW_PAD_SEC,
+        );
+      } else if (this.troughSec > this.targetSec + TROUGH_EXCESS_SEC) {
+        // Even the lowest point of the cycle carries excess latency;
+        // remove it (softened by the crossfade).
+        this.dropOldest(this.troughSec - this.targetSec);
+      } else if (this.troughSec > TROUGH_SAFE_SEC) {
+        this.targetSec = Math.max(
+          BASE_TARGET_SEC,
+          this.targetSec - TARGET_DECAY_PER_WINDOW_SEC,
+        );
+      }
+      this.windowFrames = 0;
+      this.troughSec = Infinity;
+    }
+
+    if (this.discontinuity) {
+      // Crossfade over the jump: old audio decays, new audio fades in.
+      // Consumed after the window check so that drops made there are
+      // faded within this same quantum.
+      this.discontinuity = false;
+      this.gain = 0;
+      for (let ch = 0; ch < output.length; ch++) this.tail[ch] = this.lastOut[ch];
+    }
+
     // Steer buffer fill toward the target with a gentle playback rate
     // adjustment; this is what cancels clock drift.
-    let nudge = 1 + DRIFT_GAIN * (buffered - TARGET_SEC);
+    let nudge = 1 + DRIFT_GAIN * (buffered - this.targetSec);
     if (nudge > 1 + MAX_RATE_NUDGE) nudge = 1 + MAX_RATE_NUDGE;
     if (nudge < 1 - MAX_RATE_NUDGE) nudge = 1 - MAX_RATE_NUDGE;
 
     for (let frame = 0; frame < frameCount; frame++) {
       const chunk = this.chunks[0];
       if (!chunk) {
-        // Underrun: decay to silence and re-prebuffer. Resuming only once
-        // the buffer refills keeps the gap from becoming permanent delay.
+        // Underrun: decay to silence and re-prebuffer. Delivery is proving
+        // burstier than the current target, so grow it — audible gaps are
+        // worse than temporarily elevated latency.
         this.started = false;
         this.readPos = 0;
+        this.targetSec = Math.min(MAX_TARGET_SEC, this.targetSec + TARGET_STEP_SEC);
+        this.windowFrames = 0;
+        this.troughSec = Infinity;
         for (let ch = 0; ch < output.length; ch++) this.tail[ch] = this.lastOut[ch];
         this.emitTail(output, frame, frameCount);
         return true;
