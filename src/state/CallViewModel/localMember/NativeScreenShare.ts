@@ -19,10 +19,19 @@ import { getUrlParams } from "../../../UrlParams.ts";
  * WKWebView cannot capture system audio through getDisplayMedia, so the
  * hosting client captures natively (ScreenCaptureKit) and streams media over
  * a localhost WebSocket. This manager consumes that stream inside the widget,
- * reconstructs MediaStreamTracks WebKit can publish — canvas.captureStream()
- * for video, AudioWorklet → MediaStreamAudioDestinationNode for audio — and
- * publishes them on the local participant so E2EE and room lifecycle stay
- * identical to a getDisplayMedia share.
+ * reconstructs MediaStreamTracks WebKit can publish, and publishes them on
+ * the local participant so E2EE and room lifecycle stay identical to a
+ * getDisplayMedia share.
+ *
+ * The WebSocket, protocol parsing, and JPEG decoding run in a dedicated
+ * worker: page-visibility throttling (e.g. the sharer covering this window
+ * with a fullscreen video) must not starve the pipeline. Video prefers
+ * WebKit's worker-scoped VideoTrackGenerator, which produces frames
+ * independently of the compositor; older WebKit falls back to a canvas +
+ * captureStream on the main thread (which does throttle when occluded —
+ * best we can do there). Audio PCM flows from the worker straight into an
+ * AudioWorklet through a dedicated MessageChannel, bypassing the main
+ * thread entirely.
  */
 
 /** Wire protocol message types (see Sable src-tauri/src/screen_share/protocol.rs). */
@@ -32,6 +41,19 @@ const VIDEO_CODEC_JPEG = 0x01;
 const AUDIO_FORMAT_F32 = 0x01;
 const VIDEO_HEADER_LEN = 14;
 const AUDIO_HEADER_LEN = 16;
+
+/**
+ * Jitter buffer tuning. The share-side audio budget is 80ms: the buffer
+ * steers toward TARGET_SEC and hard-drops back to it above MAX_SEC.
+ */
+const PREBUFFER_SEC = 0.04;
+const TARGET_SEC = 0.055;
+const MAX_SEC = 0.08;
+const DRIFT_GAIN = 0.4;
+const MAX_RATE_NUDGE = 0.02;
+/** Fade-in time after a discontinuity, and decay constant for the old tail. */
+const FADE_SEC = 0.005;
+const TAIL_TAU_SEC = 0.004;
 
 interface NativeScreenShareStartPayload {
   wsUrl: string;
@@ -53,27 +75,30 @@ export function isNativeScreenShareMode(): boolean {
 }
 
 /**
- * Audio sink worklet: consumes interleaved f32 PCM chunks posted from the
- * main thread and plays them out, deinterleaving into the output channels.
+ * Audio sink worklet: an adaptive jitter buffer over interleaved f32 PCM
+ * chunks. Chunks arrive either directly on the node port or, preferably, on
+ * a MessagePort handed over in a `{ port }` handshake message (wired to the
+ * media worker so audio survives main-thread throttling).
  *
- * This is a small adaptive jitter buffer. Latency must stay bounded for the
- * whole share, so beyond a ~60ms prebuffer it:
+ * Latency control:
+ * - linear-interpolation resampling at chunkRate / contextRate;
+ * - playback-rate nudge (±2%) steering fill toward TARGET_SEC, which
+ *   cancels clock drift between capture and the audio device;
+ * - hard drop of oldest chunks back to TARGET_SEC when fill exceeds
+ *   MAX_SEC, keeping the share-side delay inside the 80ms budget;
+ * - underruns re-enter prebuffering rather than splicing silence into the
+ *   middle of the stream.
  *
- * - resamples via linear interpolation at chunkRate / contextRate, which
- *   also absorbs an AudioContext that did not honor the requested rate;
- * - nudges the playback rate ±2% based on buffer fill, so slow clock drift
- *   between the capture side and the audio device never accumulates;
- * - hard-drops the oldest chunks back to ~120ms whenever the buffer exceeds
- *   ~300ms (e.g. after the tab was starved), trading a click for latency;
- * - re-enters prebuffering after an underrun instead of inserting silence
- *   into the middle of the stream, which would permanently add delay.
+ * Declicking: every discontinuity (drop or underrun) fades the new audio in
+ * over FADE_SEC while the last sample decays with TAIL_TAU_SEC, so drops
+ * produce a soft thump instead of a sharp click.
  */
 const AUDIO_SINK_WORKLET = `
-const PREBUFFER_SEC = 0.06;
-const TARGET_SEC = 0.12;
-const MAX_SEC = 0.3;
-const DRIFT_GAIN = 0.15;
-const MAX_RATE_NUDGE = 0.02;
+const PREBUFFER_SEC = ${PREBUFFER_SEC};
+const TARGET_SEC = ${TARGET_SEC};
+const MAX_SEC = ${MAX_SEC};
+const DRIFT_GAIN = ${DRIFT_GAIN};
+const MAX_RATE_NUDGE = ${MAX_RATE_NUDGE};
 
 class NativeScreenShareSink extends AudioWorkletProcessor {
   constructor() {
@@ -82,22 +107,38 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     // Fractional read position (in source frames) within chunks[0].
     this.readPos = 0;
     this.started = false;
+    this.gain = 0;
+    this.gainStep = 1 / (${FADE_SEC} * sampleRate);
+    this.tailDecay = Math.exp(-1 / (${TAIL_TAU_SEC} * sampleRate));
+    this.tail = [0, 0];
+    this.lastOut = [0, 0];
+    this.discontinuity = false;
     this.port.onmessage = (event) => {
-      const chunk = event.data;
-      if (!chunk || !(chunk.samples instanceof Float32Array) || !chunk.channels) return;
-      chunk.rate = chunk.rate > 0 ? chunk.rate : 48000;
-      chunk.frames = chunk.samples.length / chunk.channels;
-      if (chunk.frames < 1) return;
-      this.chunks.push(chunk);
-      // Latency clamp: if the buffer ballooned, drop oldest audio down to
-      // the target rather than letting the delay persist forever.
-      if (this.bufferedSeconds() > MAX_SEC) {
-        while (this.chunks.length > 1 && this.bufferedSeconds() > TARGET_SEC) {
-          this.chunks.shift();
-          this.readPos = 0;
-        }
+      const data = event.data;
+      if (data && data.port) {
+        // Direct channel from the media worker.
+        data.port.onmessage = (ev) => this.enqueue(ev.data);
+        return;
       }
+      this.enqueue(data);
     };
+  }
+
+  enqueue(chunk) {
+    if (!chunk || !(chunk.samples instanceof Float32Array) || !chunk.channels) return;
+    chunk.rate = chunk.rate > 0 ? chunk.rate : 48000;
+    chunk.frames = chunk.samples.length / chunk.channels;
+    if (chunk.frames < 1) return;
+    this.chunks.push(chunk);
+    // Latency clamp: never let the share-side buffer exceed MAX_SEC; drop
+    // the oldest audio back to target instead of accumulating delay.
+    if (this.bufferedSeconds() > MAX_SEC) {
+      while (this.chunks.length > 1 && this.bufferedSeconds() > TARGET_SEC) {
+        this.chunks.shift();
+        this.readPos = 0;
+      }
+      this.discontinuity = true;
+    }
   }
 
   bufferedSeconds() {
@@ -110,19 +151,43 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     return seconds;
   }
 
+  emitTail(output, from, to) {
+    for (let frame = from; frame < to; frame++) {
+      for (let ch = 0; ch < output.length; ch++) {
+        const t = ch < this.tail.length ? this.tail[ch] : 0;
+        output[ch][frame] = t;
+        // Keep lastOut tracking what actually reached the speaker, so a
+        // later crossfade never resurrects a stale full-scale sample.
+        this.lastOut[ch] = t;
+        this.tail[ch] = t * this.tailDecay;
+      }
+    }
+  }
+
   process(inputs, outputs) {
     const output = outputs[0];
     if (!output || output.length === 0) return true;
     const frameCount = output[0].length;
-    const buffered = this.bufferedSeconds();
 
-    if (!this.started) {
-      if (buffered < PREBUFFER_SEC) return true; // silence while prebuffering
-      this.started = true;
+    if (this.discontinuity) {
+      // Crossfade over the jump: old audio decays, new audio fades in.
+      this.discontinuity = false;
+      this.gain = 0;
+      for (let ch = 0; ch < output.length; ch++) this.tail[ch] = this.lastOut[ch];
     }
 
-    // Steer buffer fill toward the target with a gentle, inaudible-ish
-    // playback rate adjustment; this is what cancels clock drift.
+    const buffered = this.bufferedSeconds();
+    if (!this.started) {
+      if (buffered < PREBUFFER_SEC) {
+        this.emitTail(output, 0, frameCount);
+        return true;
+      }
+      this.started = true;
+      this.gain = 0;
+    }
+
+    // Steer buffer fill toward the target with a gentle playback rate
+    // adjustment; this is what cancels clock drift.
     let nudge = 1 + DRIFT_GAIN * (buffered - TARGET_SEC);
     if (nudge > 1 + MAX_RATE_NUDGE) nudge = 1 + MAX_RATE_NUDGE;
     if (nudge < 1 - MAX_RATE_NUDGE) nudge = 1 - MAX_RATE_NUDGE;
@@ -130,26 +195,35 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     for (let frame = 0; frame < frameCount; frame++) {
       const chunk = this.chunks[0];
       if (!chunk) {
-        // Underrun: emit silence and re-prebuffer. Resuming only once the
-        // buffer refills keeps the gap from becoming permanent delay.
+        // Underrun: decay to silence and re-prebuffer. Resuming only once
+        // the buffer refills keeps the gap from becoming permanent delay.
         this.started = false;
         this.readPos = 0;
-        for (let ch = 0; ch < output.length; ch++) {
-          for (let rest = frame; rest < frameCount; rest++) output[ch][rest] = 0;
-        }
+        for (let ch = 0; ch < output.length; ch++) this.tail[ch] = this.lastOut[ch];
+        this.emitTail(output, frame, frameCount);
         return true;
       }
 
       const channels = chunk.channels;
       const i0 = Math.floor(this.readPos);
-      const i1 = Math.min(i0 + 1, chunk.frames - 1);
       const t = this.readPos - i0;
+      // Interpolate across the chunk boundary: the stream is contiguous, so
+      // the next chunk's first frame is the correct right-hand sample.
+      const atEnd = i0 + 1 >= chunk.frames;
+      const next = atEnd ? this.chunks[1] : null;
       for (let ch = 0; ch < output.length; ch++) {
         const src = Math.min(ch, channels - 1);
         const a = chunk.samples[i0 * channels + src];
-        const b = chunk.samples[i1 * channels + src];
-        output[ch][frame] = a + (b - a) * t;
+        const b = atEnd
+          ? (next ? next.samples[Math.min(src, next.channels - 1)] : a)
+          : chunk.samples[(i0 + 1) * channels + src];
+        const tailValue = ch < this.tail.length ? this.tail[ch] : 0;
+        const value = (a + (b - a) * t) * this.gain + tailValue;
+        output[ch][frame] = value;
+        this.lastOut[ch] = value;
+        this.tail[ch] = tailValue * this.tailDecay;
       }
+      this.gain = Math.min(1, this.gain + this.gainStep);
 
       this.readPos += (chunk.rate / sampleRate) * nudge;
       while (this.chunks.length > 0 && this.readPos >= this.chunks[0].frames) {
@@ -163,18 +237,167 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
 registerProcessor("native-screen-share-sink", NativeScreenShareSink);
 `;
 
+/**
+ * Media worker: owns the WebSocket, protocol parsing, and JPEG decoding so
+ * none of it is subject to page-visibility throttling. Video goes through
+ * VideoTrackGenerator when this WebKit exposes it (the generated track is
+ * transferred to the main thread for publishing); otherwise decoded
+ * ImageBitmaps are posted to the main thread for the canvas fallback.
+ * Audio PCM goes straight to the AudioWorklet via a transferred MessagePort.
+ */
+const MEDIA_WORKER = `
+const MSG_VIDEO = ${MSG_VIDEO};
+const MSG_AUDIO = ${MSG_AUDIO};
+const VIDEO_CODEC_JPEG = ${VIDEO_CODEC_JPEG};
+const AUDIO_FORMAT_F32 = ${AUDIO_FORMAT_F32};
+const VIDEO_HEADER_LEN = ${VIDEO_HEADER_LEN};
+const AUDIO_HEADER_LEN = ${AUDIO_HEADER_LEN};
+
+let ws = null;
+let writer = null;
+let generatorTrack = null;
+let audioPort = null;
+let pendingVideo = null;
+let decoding = false;
+
+self.onmessage = (event) => {
+  const msg = event.data;
+  if (!msg) return;
+  if (msg.type === "init") {
+    audioPort = msg.audioPort || null;
+    initVideoPath();
+    connect(msg.wsUrl, msg.token);
+  } else if (msg.type === "stop") {
+    cleanup();
+  }
+};
+
+function initVideoPath() {
+  try {
+    if (typeof VideoTrackGenerator === "function") {
+      const generator = new VideoTrackGenerator();
+      writer = generator.writable.getWriter();
+      generatorTrack = generator.track;
+      // Track transfer can fail independently of the constructor.
+      self.postMessage({ type: "ready", track: generatorTrack }, [generatorTrack]);
+      return;
+    }
+  } catch (e) {
+    try { if (generatorTrack) generatorTrack.stop(); } catch (_) {}
+    writer = null;
+    generatorTrack = null;
+  }
+  self.postMessage({ type: "ready" });
+}
+
+function connect(wsUrl, token) {
+  ws = new WebSocket(wsUrl + "?token=" + encodeURIComponent(token));
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) onMedia(event.data);
+  };
+  ws.onclose = () => self.postMessage({ type: "closed" });
+  ws.onerror = () => self.postMessage({ type: "socket-error" });
+}
+
+function onMedia(buffer) {
+  if (buffer.byteLength < 1) return;
+  const view = new DataView(buffer);
+  switch (view.getUint8(0)) {
+    case MSG_VIDEO: {
+      if (buffer.byteLength <= VIDEO_HEADER_LEN) return;
+      if (view.getUint8(1) !== VIDEO_CODEC_JPEG) return;
+      // Latest wins: only the most recent undecoded frame is kept.
+      pendingVideo = buffer;
+      drainVideo();
+      break;
+    }
+    case MSG_AUDIO: {
+      if (buffer.byteLength <= AUDIO_HEADER_LEN || !audioPort) return;
+      if (view.getUint8(1) !== AUDIO_FORMAT_F32) return;
+      const channels = view.getUint8(2);
+      if (channels < 1) return;
+      const rate = view.getUint32(4, true);
+      const samples = new Float32Array(
+        buffer,
+        AUDIO_HEADER_LEN,
+        (buffer.byteLength - AUDIO_HEADER_LEN) >> 2,
+      );
+      audioPort.postMessage({ samples, channels, rate }, [buffer]);
+      break;
+    }
+  }
+}
+
+async function drainVideo() {
+  if (decoding) return;
+  decoding = true;
+  try {
+    while (pendingVideo) {
+      const buffer = pendingVideo;
+      pendingVideo = null;
+      const view = new DataView(buffer);
+      const width = view.getUint16(2, true);
+      const height = view.getUint16(4, true);
+      const timestamp = Number(view.getBigUint64(6, true));
+      try {
+        const bitmap = await createImageBitmap(
+          new Blob([buffer.slice(VIDEO_HEADER_LEN)], { type: "image/jpeg" }),
+        );
+        if (writer) {
+          const frame = new VideoFrame(bitmap, { timestamp });
+          bitmap.close();
+          // The writable sink takes ownership of the frame.
+          await writer.write(frame);
+        } else {
+          self.postMessage({ type: "bitmap", bitmap, width, height }, [bitmap]);
+        }
+      } catch (e) {
+        // Skip undecodable frames; the next one supersedes them anyway.
+      }
+    }
+  } finally {
+    decoding = false;
+  }
+}
+
+function cleanup() {
+  try { if (ws) ws.close(); } catch (_) {}
+  try { if (writer) writer.close(); } catch (_) {}
+  ws = null;
+  writer = null;
+}
+`;
+
+interface MediaWorkerReadyMessage {
+  type: "ready";
+  track?: MediaStreamTrack;
+}
+
+interface MediaWorkerBitmapMessage {
+  type: "bitmap";
+  bitmap: ImageBitmap;
+  width: number;
+  height: number;
+}
+
+type MediaWorkerMessage =
+  | MediaWorkerReadyMessage
+  | MediaWorkerBitmapMessage
+  | { type: "closed" }
+  | { type: "socket-error" };
+
 interface ActiveSession {
-  ws: WebSocket;
-  canvas: HTMLCanvasElement;
-  context: CanvasRenderingContext2D;
-  videoTrack: MediaStreamTrack;
+  worker: Worker;
+  workerUrl: string;
+  canvas: HTMLCanvasElement | null;
+  context: CanvasRenderingContext2D | null;
+  videoTrack: MediaStreamTrack | null;
   audioContext: AudioContext | null;
   workletNode: AudioWorkletNode | null;
   audioTrack: MediaStreamTrack | null;
   participant: LocalParticipant;
   published: boolean;
-  pendingVideo: ArrayBuffer | null;
-  decoding: boolean;
   stopped: boolean;
 }
 
@@ -274,55 +497,15 @@ export class NativeScreenShareManager {
       `Starting native screen share ${payload.width}x${payload.height}@${payload.frameRate}`,
     );
 
-    // Video: frames are decoded into a canvas whose stream WebKit can
-    // capture. The canvas must be in the DOM for captureStream to produce
-    // frames reliably in WebKit; park it off-viewport.
-    const canvas = document.createElement("canvas");
-    canvas.width = payload.width;
-    canvas.height = payload.height;
-    canvas.style.position = "fixed";
-    canvas.style.left = "-99999px";
-    canvas.style.top = "0";
-    canvas.setAttribute("aria-hidden", "true");
-    document.body.appendChild(canvas);
-    const context = canvas.getContext("2d");
-    if (!context) {
-      canvas.remove();
-      throw new Error("Could not create 2d canvas context");
-    }
-    const frameRate =
-      payload.frameRate > 0 && payload.frameRate <= 60 ? payload.frameRate : 30;
-    const videoTrack = canvas.captureStream(frameRate).getVideoTracks()[0];
-    if (!videoTrack) {
-      canvas.remove();
-      throw new Error("canvas.captureStream produced no video track");
-    }
-
-    const ws = new WebSocket(
-      `${payload.wsUrl}?token=${encodeURIComponent(payload.token)}`,
-    );
-    ws.binaryType = "arraybuffer";
-
-    const session: ActiveSession = {
-      ws,
-      canvas,
-      context,
-      videoTrack,
-      audioContext: null,
-      workletNode: null,
-      audioTrack: null,
-      participant,
-      published: false,
-      pendingVideo: null,
-      decoding: false,
-      stopped: false,
-    };
-    this.session = session;
-
-    // Audio: worklet-fed destination node. Best-effort — video must still
-    // work if the audio graph cannot start on this WebKit version.
+    // Audio graph first, so its MessagePort can be handed to the worker.
+    // Best-effort — video must still work if the audio graph cannot start
+    // on this WebKit version.
+    let audioContext: AudioContext | null = null;
+    let workletNode: AudioWorkletNode | null = null;
+    let audioTrack: MediaStreamTrack | null = null;
+    let workerAudioPort: MessagePort | null = null;
     try {
-      const audioContext = new AudioContext({
+      audioContext = new AudioContext({
         sampleRate: payload.sampleRate > 0 ? payload.sampleRate : 48_000,
       });
       const workletUrl = URL.createObjectURL(
@@ -334,7 +517,7 @@ export class NativeScreenShareManager {
         URL.revokeObjectURL(workletUrl);
       }
       const channels = payload.channels > 0 ? Math.min(payload.channels, 2) : 2;
-      const workletNode = new AudioWorkletNode(
+      workletNode = new AudioWorkletNode(
         audioContext,
         "native-screen-share-sink",
         {
@@ -357,34 +540,90 @@ export class NativeScreenShareManager {
           `AudioContext running at ${audioContext.sampleRate}Hz`,
         );
       }
-      session.audioContext = audioContext;
-      session.workletNode = workletNode;
-      session.audioTrack = destination.stream.getAudioTracks()[0] ?? null;
+      // Audio bypasses the main thread: worker → MessagePort → worklet.
+      const channel = new MessageChannel();
+      workletNode.port.postMessage({ port: channel.port1 }, [channel.port1]);
+      workerAudioPort = channel.port2;
+      audioTrack = destination.stream.getAudioTracks()[0] ?? null;
     } catch (e) {
       this.logger.error(
         "Screen share audio pipeline unavailable; sharing video only",
         e,
       );
+      audioContext = null;
+      workletNode = null;
+      audioTrack = null;
+      workerAudioPort = null;
     }
 
-    ws.onmessage = (event): void => {
-      if (event.data instanceof ArrayBuffer) this.onMediaMessage(event.data);
+    const workerUrl = URL.createObjectURL(
+      new Blob([MEDIA_WORKER], { type: "application/javascript" }),
+    );
+    const worker = new Worker(workerUrl);
+
+    const session: ActiveSession = {
+      worker,
+      workerUrl,
+      canvas: null,
+      context: null,
+      videoTrack: null,
+      audioContext,
+      workletNode,
+      audioTrack,
+      participant,
+      published: false,
+      stopped: false,
     };
-    ws.onclose = (): void => {
-      if (!session.stopped) {
-        this.logger.info("Native screen share media socket closed");
-        void this.stop();
-      }
-    };
-    ws.onerror = (): void => {
-      if (!session.stopped) {
-        this.logger.error("Native screen share media socket error");
-        this.sendStatus(false, "media socket error");
-        void this.stop();
-      }
+    this.session = session;
+
+    const ready = new Promise<MediaWorkerReadyMessage>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("media worker did not become ready")),
+        5000,
+      );
+      worker.onmessage = (event: MessageEvent<MediaWorkerMessage>): void => {
+        const msg = event.data;
+        if (msg?.type === "ready") {
+          clearTimeout(timeout);
+          resolve(msg);
+          return;
+        }
+        this.onWorkerMessage(session, msg);
+      };
+      worker.onerror = (event): void => {
+        clearTimeout(timeout);
+        reject(new Error(`media worker error: ${event.message}`));
+      };
+    });
+
+    worker.postMessage(
+      {
+        type: "init",
+        wsUrl: payload.wsUrl,
+        token: payload.token,
+        audioPort: workerAudioPort ?? undefined,
+      },
+      workerAudioPort ? [workerAudioPort] : [],
+    );
+
+    const readyMessage = await ready;
+    worker.onmessage = (event: MessageEvent<MediaWorkerMessage>): void => {
+      this.onWorkerMessage(session, event.data);
     };
 
-    await participant.publishTrack(videoTrack, {
+    if (readyMessage.track instanceof MediaStreamTrack) {
+      // Worker-generated track: frame delivery is independent of the
+      // compositor, so occluding this window does not stall the share.
+      session.videoTrack = readyMessage.track;
+      this.logger.info("Using worker VideoTrackGenerator video path");
+    } else {
+      session.videoTrack = this.setupCanvasFallback(session, payload);
+      this.logger.info(
+        "VideoTrackGenerator unavailable; using canvas captureStream fallback",
+      );
+    }
+
+    await participant.publishTrack(session.videoTrack, {
       source: Track.Source.ScreenShare,
     });
     if (session.audioTrack) {
@@ -399,71 +638,78 @@ export class NativeScreenShareManager {
     this.logger.info("Native screen share tracks published");
   }
 
-  private onMediaMessage(buffer: ArrayBuffer): void {
-    const session = this.session;
-    if (!session || session.stopped || buffer.byteLength < 1) return;
-    const view = new DataView(buffer);
-
-    switch (view.getUint8(0)) {
-      case MSG_VIDEO: {
-        if (buffer.byteLength <= VIDEO_HEADER_LEN) return;
-        if (view.getUint8(1) !== VIDEO_CODEC_JPEG) return;
-        // Latest wins: only the most recent undecoded frame is kept.
-        session.pendingVideo = buffer;
-        void this.drainVideo(session);
-        break;
-      }
-      case MSG_AUDIO: {
-        if (buffer.byteLength <= AUDIO_HEADER_LEN || !session.workletNode)
-          return;
-        if (view.getUint8(1) !== AUDIO_FORMAT_F32) return;
-        const channels = view.getUint8(2);
-        if (channels < 1) return;
-        const rate = view.getUint32(4, true);
-        const samples = new Float32Array(
-          buffer,
-          AUDIO_HEADER_LEN,
-          (buffer.byteLength - AUDIO_HEADER_LEN) >> 2,
-        );
-        session.workletNode.port.postMessage({ samples, channels, rate }, [
-          buffer,
-        ]);
-        break;
-      }
-      default:
-        break;
+  private setupCanvasFallback(
+    session: ActiveSession,
+    payload: NativeScreenShareStartPayload,
+  ): MediaStreamTrack {
+    // The canvas must be in the DOM for captureStream to produce frames
+    // reliably in WebKit; park it off-viewport.
+    const canvas = document.createElement("canvas");
+    canvas.width = payload.width;
+    canvas.height = payload.height;
+    canvas.style.position = "fixed";
+    canvas.style.left = "-99999px";
+    canvas.style.top = "0";
+    canvas.setAttribute("aria-hidden", "true");
+    document.body.appendChild(canvas);
+    const context = canvas.getContext("2d");
+    if (!context) {
+      canvas.remove();
+      throw new Error("Could not create 2d canvas context");
     }
+    const frameRate =
+      payload.frameRate > 0 && payload.frameRate <= 60 ? payload.frameRate : 30;
+    const videoTrack = canvas.captureStream(frameRate).getVideoTracks()[0];
+    if (!videoTrack) {
+      canvas.remove();
+      throw new Error("canvas.captureStream produced no video track");
+    }
+    session.canvas = canvas;
+    session.context = context;
+    return videoTrack;
   }
 
-  private async drainVideo(session: ActiveSession): Promise<void> {
-    if (session.decoding) return;
-    session.decoding = true;
-    try {
-      while (!session.stopped && session.pendingVideo) {
-        const buffer = session.pendingVideo;
-        session.pendingVideo = null;
-        const view = new DataView(buffer);
-        const width = view.getUint16(2, true);
-        const height = view.getUint16(4, true);
-        try {
-          const bitmap = await createImageBitmap(
-            new Blob([buffer.slice(VIDEO_HEADER_LEN)], { type: "image/jpeg" }),
-          );
-          if (
-            session.canvas.width !== width ||
-            session.canvas.height !== height
-          ) {
-            session.canvas.width = width;
-            session.canvas.height = height;
-          }
-          session.context.drawImage(bitmap, 0, 0);
+  private onWorkerMessage(
+    session: ActiveSession,
+    msg: MediaWorkerMessage,
+  ): void {
+    if (session.stopped || !msg) return;
+    switch (msg.type) {
+      case "bitmap": {
+        const { bitmap, width, height } = msg;
+        if (!session.canvas || !session.context) {
           bitmap.close();
-        } catch (e) {
-          this.logger.warn("Failed to decode screen share frame", e);
+          return;
         }
+        if (
+          session.canvas.width !== width ||
+          session.canvas.height !== height
+        ) {
+          session.canvas.width = width;
+          session.canvas.height = height;
+        }
+        session.context.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        // Push the frame explicitly where supported, instead of waiting for
+        // the (occlusion-throttled) compositor to sample the canvas.
+        (
+          session.videoTrack as MediaStreamTrack & {
+            requestFrame?: () => void;
+          }
+        ).requestFrame?.();
+        break;
       }
-    } finally {
-      session.decoding = false;
+      case "closed":
+        this.logger.info("Native screen share media socket closed");
+        void this.stop();
+        break;
+      case "socket-error":
+        this.logger.error("Native screen share media socket error");
+        this.sendStatus(false, "media socket error");
+        void this.stop();
+        break;
+      default:
+        break;
     }
   }
 
@@ -474,13 +720,11 @@ export class NativeScreenShareManager {
     session.stopped = true;
     this.logger.info("Stopping native screen share");
 
-    try {
-      session.ws.close();
-    } catch {
-      // Socket may already be dead.
-    }
+    session.worker.postMessage({ type: "stop" });
+    session.worker.terminate();
+    URL.revokeObjectURL(session.workerUrl);
 
-    if (session.published) {
+    if (session.published && session.videoTrack) {
       await session.participant
         .unpublishTrack(session.videoTrack, true)
         .catch((e) => this.logger.error("Failed to unpublish video track", e));
@@ -492,7 +736,7 @@ export class NativeScreenShareManager {
           );
       }
     }
-    session.videoTrack.stop();
+    session.videoTrack?.stop();
     session.audioTrack?.stop();
     session.workletNode?.disconnect();
     if (session.audioContext) {
@@ -500,7 +744,7 @@ export class NativeScreenShareManager {
         .close()
         .catch((e) => this.logger.warn("Failed to close audio context", e));
     }
-    session.canvas.remove();
+    session.canvas?.remove();
     this.sendStatus(false);
   }
 }
