@@ -5,13 +5,24 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 Please see LICENSE in the repository root for full details.
 */
 
-import { Track, type LocalParticipant } from "livekit-client";
+import {
+  Track,
+  type LocalParticipant,
+  type TrackPublishOptions,
+} from "livekit-client";
 import { type Logger } from "matrix-js-sdk/lib/logger";
 import { type IWidgetApiRequest } from "matrix-widget-api";
 
 import { type Behavior } from "../../Behavior.ts";
 import { ElementWidgetActions, widget } from "../../../widget.ts";
 import { getUrlParams } from "../../../UrlParams.ts";
+import {
+  advancedScreenShare,
+  screenShareBitrate,
+  screenShareCodec,
+  screenShareFramerate,
+} from "../../../settings/settings.ts";
+import { Config } from "../../../config/Config.ts";
 
 /**
  * Native screen share bridge (macOS Tauri host).
@@ -72,6 +83,43 @@ interface NativeScreenShareStartPayload {
 export function isNativeScreenShareMode(): boolean {
   const { nativeScreenShare, hideScreensharing } = getUrlParams();
   return widget !== null && nativeScreenShare === true && !hideScreensharing;
+}
+
+/**
+ * Publish options for the native screen share video track, mirroring the
+ * getDisplayMedia path in LocalMember. A bare publishTrack leaves the track
+ * without bitrate caps, content hints, or degradation preferences — when a
+ * camera track joins the connection, bandwidth estimation then slowly
+ * squeezes the uncapped share until quality collapses (recovering briefly
+ * on renegotiation, i.e. camera restarts).
+ */
+function videoPublishOptions(frameRate: number): TrackPublishOptions {
+  const options: TrackPublishOptions = {
+    source: Track.Source.ScreenShare,
+    simulcast: false,
+    // Screen content: hold resolution and let framerate give way instead.
+    degradationPreference: "maintain-resolution",
+    // H.264 hardware-encodes through VideoToolbox on macOS WebKit, keeping
+    // CPU headroom when a camera (and its effects) publish concurrently.
+    videoCodec: "h264",
+    screenShareEncoding: {
+      maxBitrate:
+        Config.get().media_quality?.screen_share?.max_bitrate ?? 5_000_000,
+      maxFramerate:
+        Config.get().media_quality?.screen_share?.max_framerate ?? frameRate,
+    },
+  };
+
+  if (advancedScreenShare.getValue()) {
+    // The user opted into explicit screen share settings; respect them.
+    options.videoCodec = screenShareCodec.getValue();
+    options.screenShareEncoding = {
+      maxBitrate: screenShareBitrate.getValue(),
+      maxFramerate: screenShareFramerate.getValue(),
+    };
+  }
+
+  return options;
 }
 
 /**
@@ -259,6 +307,9 @@ let generatorTrack = null;
 let audioPort = null;
 let pendingVideo = null;
 let decoding = false;
+// SCK timestamps are host-clock microseconds (huge absolute values);
+// rebase to zero so the encoder sees a sane, monotonic timeline.
+let baseTimestamp = null;
 
 self.onmessage = (event) => {
   const msg = event.data;
@@ -339,7 +390,9 @@ async function drainVideo() {
       const view = new DataView(buffer);
       const width = view.getUint16(2, true);
       const height = view.getUint16(4, true);
-      const timestamp = Number(view.getBigUint64(6, true));
+      const rawTimestamp = Number(view.getBigUint64(6, true));
+      if (baseTimestamp === null) baseTimestamp = rawTimestamp;
+      const timestamp = Math.max(0, rawTimestamp - baseTimestamp);
       try {
         const bitmap = await createImageBitmap(
           new Blob([buffer.slice(VIDEO_HEADER_LEN)], { type: "image/jpeg" }),
@@ -623,9 +676,16 @@ export class NativeScreenShareManager {
       );
     }
 
-    await participant.publishTrack(session.videoTrack, {
-      source: Track.Source.ScreenShare,
-    });
+    try {
+      // Screen content wants detail preserved over smooth motion.
+      session.videoTrack.contentHint = "detail";
+    } catch {
+      // Older WebKit without contentHint; purely advisory.
+    }
+    await participant.publishTrack(
+      session.videoTrack,
+      videoPublishOptions(payload.frameRate),
+    );
     if (session.audioTrack) {
       await participant.publishTrack(session.audioTrack, {
         source: Track.Source.ScreenShareAudio,
