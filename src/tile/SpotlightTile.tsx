@@ -36,6 +36,7 @@ import classNames from "classnames";
 import { type TrackReferenceOrPlaceholder } from "@livekit/components-core";
 import { Menu, MenuItem } from "@vector-im/compound-web";
 
+import { PopOutIcon } from "@vector-im/compound-design-tokens/assets/web/icons";
 import FullScreenMaximiseIcon from "../icons/FullScreenMaximise.svg?react";
 import FullScreenMinimiseIcon from "../icons/FullScreenMinimise.svg?react";
 import { MediaView } from "./MediaView";
@@ -48,6 +49,13 @@ import { type SpotlightTileViewModel } from "../state/TileViewModel";
 import { useBehavior } from "../useBehavior";
 import { type MemberMediaViewModel } from "../state/media/MemberMediaViewModel";
 import { type LocalUserMediaViewModel } from "../state/media/LocalUserMediaViewModel";
+import { allowPipSetting, useSetting } from "../settings/settings";
+import {
+  enterPictureInPicture,
+  isDocumentFullscreen,
+  subscribeHostFullscreenChanges,
+  toggleHostAwareFullscreen,
+} from "../hostMedia";
 import { type RemoteUserMediaViewModel } from "../state/media/RemoteUserMediaViewModel";
 import { type UserMediaViewModel } from "../state/media/UserMediaViewModel";
 import { type ScreenShareViewModel } from "../state/media/ScreenShareViewModel";
@@ -91,7 +99,7 @@ const SpotlightLocalUserMediaItem: FC<SpotlightLocalUserMediaItemProps> = ({
   ...props
 }) => {
   const mirror = useBehavior(vm.mirror$);
-  return <MediaView mirror={mirror} {...props} />;
+  return <MediaView mirror={mirror} showPipButton={false} {...props} />;
 };
 
 SpotlightLocalUserMediaItem.displayName = "SpotlightLocalUserMediaItem";
@@ -106,7 +114,12 @@ const SpotlightRemoteUserMediaItem: FC<SpotlightRemoteUserMediaItemProps> = ({
 }) => {
   const waitingForMedia = useBehavior(vm.waitingForMedia$);
   return (
-    <MediaView waitingForMedia={waitingForMedia} mirror={false} {...props} />
+    <MediaView
+      waitingForMedia={waitingForMedia}
+      mirror={false}
+      showPipButton={false}
+      {...props}
+    />
   );
 };
 
@@ -157,7 +170,14 @@ const SpotlightScreenShareItem: FC<SpotlightScreenShareItemProps> = ({
   vm,
   ...props
 }) => {
-  return <MediaView videoFit="contain" mirror={false} {...props} />;
+  return (
+    <MediaView
+      videoFit="contain"
+      mirror={false}
+      showPipButton={false}
+      {...props}
+    />
+  );
 };
 
 interface SpotlightRemoteScreenShareItemProps extends SpotlightMemberMediaItemBaseProps {
@@ -417,25 +437,65 @@ export const SpotlightTile: FC<Props> = ({
   const canGoBack = visibleIndex > 0;
   const canGoToNext = visibleIndex !== -1 && visibleIndex < media.length - 1;
 
+  const [allowPip] = useSetting(allowPipSetting);
+  const [hostFullscreen, setHostFullscreen] = useState(false);
+  const [inPictureInPicture, setInPictureInPicture] = useState(false);
+
   const isFullscreen = useCallback((): boolean => {
-    const rootElement = document.body;
-    if (rootElement && document.fullscreenElement) return true;
-    return false;
-  }, []);
+    return isDocumentFullscreen() || hostFullscreen;
+  }, [hostFullscreen]);
 
   const FullScreenIcon = isFullscreen()
     ? FullScreenMinimiseIcon
     : FullScreenMaximiseIcon;
 
   const onToggleFullscreen = useCallback(() => {
-    const rootElement = document.body;
-    if (!rootElement) return;
-    if (isFullscreen()) {
-      void document?.exitFullscreen();
-    } else {
-      void rootElement.requestFullscreen();
-    }
-  }, [isFullscreen]);
+    void toggleHostAwareFullscreen(hostFullscreen).then(setHostFullscreen);
+  }, [hostFullscreen]);
+
+  const onTogglePictureInPicture = useCallback(() => {
+    const video = ourRef.current?.querySelector("video");
+    if (!video) return;
+    void enterPictureInPicture(video).catch(() => {
+      // WKWebView may reject PiP until the video has rendered frames.
+    });
+  }, [ourRef]);
+
+  const showPipButton =
+    platform === "desktop" &&
+    allowPip &&
+    visibleMedia != null &&
+    visibleMedia.type !== "ringing";
+
+  useEffect(() => {
+    const onFullscreenChange = (): void => {
+      if (!isDocumentFullscreen()) setHostFullscreen(false);
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    const unsubscribeHost = subscribeHostFullscreenChanges(setHostFullscreen);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener(
+        "webkitfullscreenchange",
+        onFullscreenChange,
+      );
+      unsubscribeHost();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onPipChange = (): void => {
+      const video = ourRef.current?.querySelector("video") ?? null;
+      setInPictureInPicture(document.pictureInPictureElement === video);
+    };
+    document.addEventListener("enterpictureinpicture", onPipChange);
+    document.addEventListener("leavepictureinpicture", onPipChange);
+    return () => {
+      document.removeEventListener("enterpictureinpicture", onPipChange);
+      document.removeEventListener("leavepictureinpicture", onPipChange);
+    };
+  }, [ourRef]);
 
   // To keep track of which item is visible, we need an intersection observer
   // hooked up to the root element and the items. Because the items will run
@@ -523,6 +583,26 @@ export const SpotlightTile: FC<Props> = ({
         ))}
       </div>
 
+      {showPipButton && (
+        <div className={styles.topRightButtons}>
+          <button
+            type="button"
+            className={classNames(styles.expand)}
+            aria-label={
+              inPictureInPicture
+                ? t("video_tile.exit_pip", "Exit picture in picture")
+                : t("video_tile.enter_pip", "Picture in picture")
+            }
+            aria-pressed={inPictureInPicture}
+            onClick={onTogglePictureInPicture}
+            tabIndex={focusable ? undefined : -1}
+            data-testid="spotlight_pip"
+          >
+            <PopOutIcon aria-hidden width={20} height={20} />
+          </button>
+        </div>
+      )}
+
       <div className={styles.bottomRightButtons}>
         {visibleMedia?.type === "screen share" && !visibleMedia.local && (
           <ScreenShareVolumeButton vm={visibleMedia} />
@@ -530,9 +610,11 @@ export const SpotlightTile: FC<Props> = ({
         {platform === "desktop" && (
           <button
             className={classNames(styles.expand)}
-            aria-label={"maximise"}
+            aria-label={isFullscreen() ? "minimise" : "maximise"}
+            aria-pressed={isFullscreen()}
             onClick={onToggleFullscreen}
             tabIndex={focusable ? undefined : -1}
+            data-testid="spotlight_fullscreen"
           >
             <FullScreenIcon aria-hidden width={20} height={20} />
           </button>

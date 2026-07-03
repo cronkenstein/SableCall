@@ -139,7 +139,45 @@ unconditionally select the container so we can use cqmin units */
   grid-area: reactions;
   place-self: start end;
   display: flex;
+  align-items: flex-start;
   gap: var(--cpd-space-1x);
+}
+
+/* Upper-right cluster — kept out of the spotlight expand / fullscreen controls. */
+.reactions > .pipButton {
+  appearance: none;
+  border: none;
+  border-radius: var(--cpd-radius-pill-effect);
+  padding: var(--cpd-space-1x);
+  background: var(--cpd-color-bg-action-primary-rest);
+  box-shadow: var(--small-drop-shadow);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.15s,
+    background-color 0.1s;
+  flex-shrink: 0;
+}
+
+.fg:has(:focus-visible) .reactions > .pipButton,
+.fg:hover .reactions > .pipButton,
+.reactions > .pipButton[data-enabled="true"] {
+  opacity: 1;
+}
+
+@media (hover) {
+  .reactions > .pipButton:hover {
+    background: var(--cpd-color-bg-action-primary-hovered);
+  }
+}
+
+.reactions > .pipButton:active {
+  background: var(--cpd-color-bg-action-primary-pressed);
+}
+
+.reactions > .pipButton > svg {
+  display: block;
+  color: var(--cpd-color-icon-on-solid-primary);
 }
 
 .nameTag > svg,

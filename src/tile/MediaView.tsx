@@ -13,12 +13,19 @@ import {
   type ReactNode,
   type ComponentType,
   type SVGAttributes,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
 } from "react";
 import { useTranslation } from "react-i18next";
 import classNames from "classnames";
 import { VideoTrack } from "@livekit/components-react";
 import { Text, Tooltip } from "@vector-im/compound-web";
-import { ErrorSolidIcon } from "@vector-im/compound-design-tokens/assets/web/icons";
+import {
+  ErrorSolidIcon,
+  PopOutIcon,
+} from "@vector-im/compound-design-tokens/assets/web/icons";
 
 import styles from "./MediaView.module.css";
 import { Avatar } from "../Avatar";
@@ -32,6 +39,8 @@ import {
 import { type ReactionOption } from "../reactions";
 import { ReactionIndicator } from "../reactions/ReactionIndicator";
 import { RTCConnectionStats } from "../RTCConnectionStats";
+import { enterPictureInPicture } from "../hostMedia";
+import { platform } from "../Platform";
 
 interface Props extends ComponentProps<typeof animated.div> {
   className?: string;
@@ -60,6 +69,8 @@ interface Props extends ComponentProps<typeof animated.div> {
   rtcBackendIdentity?: string;
   // The focus url, mainly for debugging purposes
   focusUrl?: string;
+  /** When false, the host (e.g. SpotlightTile) owns the PiP control. */
+  showPipButton?: boolean;
 }
 
 export const MediaView: FC<Props> = ({
@@ -89,14 +100,45 @@ export const MediaView: FC<Props> = ({
   videoStreamStats,
   rtcBackendIdentity,
   focusUrl,
+  showPipButton: showPipButtonProp = true,
   ...props
 }) => {
   const { t } = useTranslation();
   const [handRaiseTimerVisible] = useSetting(showHandRaisedTimer);
   const [showConnectionStats] = useSetting(showConnectionStatsSetting);
   const [allowPip] = useSetting(allowPipSetting);
+  const mediaRef = useRef<HTMLDivElement | null>(null);
+  const [inPictureInPicture, setInPictureInPicture] = useState(false);
 
   const avatarSize = Math.round(Math.min(targetWidth, targetHeight) / 2);
+  const showPipButton =
+    showPipButtonProp &&
+    platform === "desktop" &&
+    allowPip &&
+    videoEnabled &&
+    video?.publication !== undefined &&
+    targetWidth >= 120;
+
+  useEffect(() => {
+    const onPipChange = (): void => {
+      const videoEl = mediaRef.current?.querySelector("video") ?? null;
+      setInPictureInPicture(document.pictureInPictureElement === videoEl);
+    };
+    document.addEventListener("enterpictureinpicture", onPipChange);
+    document.addEventListener("leavepictureinpicture", onPipChange);
+    return () => {
+      document.removeEventListener("enterpictureinpicture", onPipChange);
+      document.removeEventListener("leavepictureinpicture", onPipChange);
+    };
+  }, []);
+
+  const onTogglePictureInPicture = useCallback(() => {
+    const videoEl = mediaRef.current?.querySelector("video");
+    if (!videoEl) return;
+    void enterPictureInPicture(videoEl).catch(() => {
+      // WKWebView may reject PiP until the video has rendered frames.
+    });
+  }, []);
 
   const warnings = unencryptedWarning && (
     <Tooltip
@@ -115,13 +157,22 @@ export const MediaView: FC<Props> = ({
     </Tooltip>
   );
 
+  const setRefs = useCallback(
+    (node: HTMLDivElement | null) => {
+      mediaRef.current = node;
+      if (typeof ref === "function") ref(node);
+      else if (ref) ref.current = node;
+    },
+    [ref],
+  );
+
   return (
     <animated.div
       className={classNames(styles.media, className, {
         [styles.mirror]: mirror,
       })}
       style={style}
-      ref={ref}
+      ref={setRefs}
       data-testid="videoTile"
       data-video-fit={videoFit}
       {...props}
@@ -152,6 +203,24 @@ export const MediaView: FC<Props> = ({
       </div>
       <div className={styles.fg}>
         <div className={styles.reactions}>
+          {showPipButton && (
+            <button
+              type="button"
+              className={styles.pipButton}
+              aria-label={
+                inPictureInPicture
+                  ? t("video_tile.exit_pip", "Exit picture in picture")
+                  : t("video_tile.enter_pip", "Picture in picture")
+              }
+              aria-pressed={inPictureInPicture}
+              data-enabled={inPictureInPicture || undefined}
+              onClick={onTogglePictureInPicture}
+              tabIndex={focusable ? undefined : -1}
+              data-testid="video_pip"
+            >
+              <PopOutIcon aria-hidden width={18} height={18} />
+            </button>
+          )}
           <RaisedHandIndicator
             raisedHandTime={raisedHandTime}
             miniature={avatarSize < 96}

@@ -115,6 +115,20 @@ Please see LICENSE in the repository root for full details.
   z-index: 1;
 }
 
+.topRightButtons {
+  display: flex;
+  gap: var(--cpd-space-2x);
+  position: absolute;
+  inset-block-start: var(--cpd-space-1x);
+  inset-inline-end: var(--cpd-space-1x);
+  z-index: 2;
+}
+
+.topRightButtons > .expand {
+  inset: unset;
+  position: static;
+}
+
 .volumeSlider {
   width: 100%;
   min-width: 172px;
