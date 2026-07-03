@@ -128,9 +128,12 @@ function videoPublishOptions(frameRate: number): TrackPublishOptions {
     simulcast: false,
     // Screen content: hold resolution and let framerate give way instead.
     degradationPreference: "maintain-resolution",
-    // H.264 hardware-encodes through VideoToolbox on macOS WebKit, keeping
-    // CPU headroom when a camera (and its effects) publish concurrently.
-    videoCodec: "h264",
+    // Deliberately no videoCodec override: the room default (VP8) is the
+    // universally-decodable WebRTC codec. LiveKit's backupCodec rescue for
+    // incapable subscribers is DISABLED under E2EE (see publish path:
+    // "TODO remove this once e2ee is supported for backup codecs"), so
+    // forcing H.264 here permanently blanked the share for viewers without
+    // H.264 WebRTC decode (codec-free Chromium builds, some Android).
     screenShareEncoding: {
       maxBitrate:
         Config.get().media_quality?.screen_share?.max_bitrate ?? 5_000_000,
@@ -140,7 +143,8 @@ function videoPublishOptions(frameRate: number): TrackPublishOptions {
   };
 
   if (advancedScreenShare.getValue()) {
-    // The user opted into explicit screen share settings; respect them.
+    // The user opted into explicit screen share settings; respect them
+    // (including their codec choice — same semantics as the web path).
     options.videoCodec = screenShareCodec.getValue();
     options.screenShareEncoding = {
       maxBitrate: screenShareBitrate.getValue(),
