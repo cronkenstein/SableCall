@@ -380,7 +380,7 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     }
 
     this.statFrames += frameCount;
-    if (this.statFrames >= sampleRate * 5) {
+    if (this.statFrames >= sampleRate * 60) {
       this.port.postMessage({
         type: "stats",
         chunks: this.statChunks,
@@ -429,9 +429,20 @@ let pendingWrite = false;
 // rebase to zero so the encoder sees a sane, monotonic timeline.
 let baseTimestamp = null;
 
-// Observability heartbeat: 5s deltas posted to the main thread. A stalled
+// KEEP-ALIVE — load-bearing, do not remove. When the hosting window is
+// fully occluded (e.g. the sharer views a fullscreen Space), macOS
+// deschedules the WebContent process ~5-10s after occlusion despite the
+// host's scheduling knobs, starving the entire bridge (video and audio).
+// Periodic observable activity defeats the idle heuristic. This was
+// discovered when 5s diagnostics accidentally fixed the stutter.
+const keepAliveTimer = setInterval(() => {
+  self.postMessage({ type: "tick" });
+}, 2000);
+
+// Observability heartbeat: 60s deltas posted to the main thread. A stalled
 // heartbeat is itself a signal — it means this worker stopped being
-// scheduled entirely.
+// scheduled entirely. Deliberately outside the ~5-10s suspension grace
+// window so the keep-alive above is provably the only masking activity.
 let stats = { video: 0, audio: 0, decoded: 0, written: 0, writeDropped: 0, bitmaps: 0, decodeErrors: 0 };
 const statsTimer = setInterval(() => {
   self.postMessage({
@@ -446,7 +457,7 @@ const statsTimer = setInterval(() => {
     queue: videoDecoder ? videoDecoder.decodeQueueSize : -1,
   });
   stats = { video: 0, audio: 0, decoded: 0, written: 0, writeDropped: 0, bitmaps: 0, decodeErrors: 0 };
-}, 5000);
+}, 60000);
 
 self.onmessage = (event) => {
   const msg = event.data;
@@ -667,6 +678,7 @@ async function drainVideo() {
 }
 
 function cleanup() {
+  clearInterval(keepAliveTimer);
   clearInterval(statsTimer);
   try { if (ws) ws.close(); } catch (_) {}
   disposeDecoder();
@@ -704,6 +716,7 @@ type MediaWorkerMessage =
   | MediaWorkerReadyMessage
   | MediaWorkerBitmapMessage
   | MediaWorkerStatsMessage
+  | { type: "tick" }
   | { type: "closed" }
   | { type: "socket-error" };
 
@@ -1066,6 +1079,12 @@ export class NativeScreenShareManager {
         ).requestFrame?.();
         break;
       }
+      case "tick":
+        // Keep-alive from the worker (see MEDIA_WORKER): receiving it here
+        // puts a task on the main thread every 2s, which together with the
+        // worker's timer keeps macOS from descheduling this process while
+        // the hosting window is occluded. Intentionally does nothing.
+        break;
       case "stats":
         // Mirrors the host-side heartbeat: recv counts show what crossed
         // the socket; decode/write counts show what survived this process.
