@@ -7,6 +7,7 @@ Please see LICENSE in the repository root for full details.
 
 import {
   AudioPresets,
+  LocalVideoTrack,
   Track,
   type LocalParticipant,
   type TrackPublishOptions,
@@ -732,6 +733,10 @@ interface ActiveSession {
   participant: LocalParticipant;
   published: boolean;
   stopped: boolean;
+  /** Publish-side (post-generator) observability. */
+  publishedVideoTrack: LocalVideoTrack | null;
+  senderStatsTimer: number | null;
+  lastFramesSent: number;
 }
 
 export class NativeScreenShareManager {
@@ -874,6 +879,22 @@ export class NativeScreenShareManager {
       );
       const destination = audioContext.createMediaStreamDestination();
       workletNode.connect(destination);
+      // Audibility exemption — load-bearing. WebKit throttles the rendering
+      // of AudioContexts that produce no audible output when the page is
+      // hidden (ours only feeds a MediaStream destination), and an occluded,
+      // silent page loses its media-pipeline scheduling exemption — observed
+      // as the publish stack running in stop-and-go bursts (worklet buffer
+      // ballooning, clamp drops, remote stutter) while the bridge itself
+      // stayed perfectly healthy. Routing an inaudible tone (-68dB @ 30Hz)
+      // to the real output marks the context — and the page — as audibly
+      // playing, the same exemption that keeps a background music tab alive.
+      const exemptionGain = audioContext.createGain();
+      exemptionGain.gain.value = 0.0004;
+      const exemptionOsc = audioContext.createOscillator();
+      exemptionOsc.frequency.value = 30;
+      exemptionOsc.connect(exemptionGain);
+      exemptionGain.connect(audioContext.destination);
+      exemptionOsc.start();
       if (audioContext.state === "suspended") await audioContext.resume();
       // The worklet resamples by the per-chunk rate, so a mismatch here is
       // handled — but it is worth knowing about when debugging latency.
@@ -938,6 +959,9 @@ export class NativeScreenShareManager {
       participant,
       published: false,
       stopped: false,
+      publishedVideoTrack: null,
+      senderStatsTimer: null,
+      lastFramesSent: 0,
     };
     this.session = session;
 
@@ -994,10 +1018,18 @@ export class NativeScreenShareManager {
     } catch {
       // Older WebKit without contentHint; purely advisory.
     }
-    await participant.publishTrack(
+    const videoPublication = await participant.publishTrack(
       session.videoTrack,
       videoPublishOptions(payload.frameRate),
     );
+    if (videoPublication.track instanceof LocalVideoTrack) {
+      // Publish-side observability: the bridge heartbeats end at the
+      // generator write; this samples the WebRTC encoder beyond it.
+      session.publishedVideoTrack = videoPublication.track;
+      session.senderStatsTimer = window.setInterval(() => {
+        void this.logSenderStats(session);
+      }, 10_000);
+    }
     if (session.audioTrack) {
       const stereo = (payload.channels > 0 ? payload.channels : 2) >= 2;
       await participant.publishTrack(session.audioTrack, {
@@ -1016,6 +1048,26 @@ export class NativeScreenShareManager {
     session.published = true;
     this.sendStatus(true);
     this.logger.info("Native screen share tracks published");
+  }
+
+  /** Samples the publish-side WebRTC encoder (beyond the bridge probes). */
+  private async logSenderStats(session: ActiveSession): Promise<void> {
+    const track = session.publishedVideoTrack;
+    if (!track || session.stopped) return;
+    try {
+      const stats = await track.getSenderStats();
+      const s = stats[0];
+      if (!s) return;
+      const sentDelta = s.framesSent - session.lastFramesSent;
+      session.lastFramesSent = s.framesSent;
+      this.logger.info(
+        `publish 10s: sent=${sentDelta}f (now ${s.framesPerSecond ?? "?"}fps) ` +
+          `${s.frameWidth}x${s.frameHeight} limit=${s.qualityLimitationReason ?? "none"} ` +
+          `target=${Math.round((s.targetBitrate ?? 0) / 1000)}kbps`,
+      );
+    } catch {
+      // Stats unavailable mid-renegotiation; try again next tick.
+    }
   }
 
   private setupCanvasFallback(
@@ -1114,6 +1166,9 @@ export class NativeScreenShareManager {
     session.stopped = true;
     this.logger.info("Stopping native screen share");
 
+    if (session.senderStatsTimer !== null) {
+      clearInterval(session.senderStatsTimer);
+    }
     session.worker.postMessage({ type: "stop" });
     session.worker.terminate();
     URL.revokeObjectURL(session.workerUrl);
