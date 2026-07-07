@@ -17,6 +17,7 @@ import {
 import { logger } from "matrix-js-sdk/lib/logger";
 
 import { useEarpieceAudioConfig } from "../MediaDevicesContext";
+import { platform } from "../Platform";
 import { useReactiveState } from "../useReactiveState";
 import * as controls from "../controls";
 
@@ -41,6 +42,14 @@ export interface MatrixAudioRendererProps {
 }
 
 const prefixedLogger = logger.getChild("[MatrixAudioRenderer]");
+
+function shouldRouteAudioThroughWebContext(stereoPan: number): boolean {
+  if (stereoPan !== 0) return true;
+  // WKWebView ignores HTMLMediaElement.volume. Route mobile remote audio through
+  // LiveKit's per-track gain nodes so screenshare volume controls work.
+  return platform !== "desktop";
+}
+
 /**
  * Takes care of handling remote participants’ audio tracks and makes sure that microphones and screen share are audible.
  *
@@ -103,11 +112,11 @@ export function LivekitRoomAudioRenderer({
   // AudioContext gets stopped if the webview gets moved into the background.
   // Once the phone is in standby audio playback will stop.
   // So we can only use the pan trick only works is the phone is not in standby.
-  // If earpiece mode is not used we do not use audioContext to allow standby playback.
-  // shouldUseAudioContext is set to false if stereoPan === 0 to allow standby bluetooth playback.
+  // If earpiece mode is not used we normally skip audioContext to allow standby playback.
+  // On mobile we still route through audioContext so per-track gain (screenshare volume) works.
 
   const { pan: stereoPan, volume: volumeFactor } = useEarpieceAudioConfig();
-  const shouldUseAudioContext = stereoPan !== 0;
+  const shouldUseAudioContext = shouldRouteAudioThroughWebContext(stereoPan);
 
   // initialize the potentially used audio context.
   const [audioContext, setAudioContext] = useState<AudioContext | undefined>(
