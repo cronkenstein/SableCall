@@ -17,7 +17,7 @@ import {
   type Room,
   Track,
 } from "livekit-client";
-import { type ReactNode } from "react";
+import { forwardRef } from "react";
 import { useTracks } from "@livekit/components-react";
 
 import { testAudioContext } from "../useAudioContext.test";
@@ -52,13 +52,15 @@ afterEach(() => {
 vi.mock("@livekit/components-react", async (importOriginal) => {
   return {
     ...(await importOriginal()),
-    AudioTrack: (props: { trackRef: TrackReference }): ReactNode => {
-      return (
-        <audio data-testid={"audio"}>
-          {getTrackReferenceId(props.trackRef)}
-        </audio>
-      );
-    },
+    AudioTrack: forwardRef<HTMLAudioElement, { trackRef: TrackReference }>(
+      function AudioTrack(props, ref) {
+        return (
+          <audio ref={ref} data-testid={"audio"}>
+            {getTrackReferenceId(props.trackRef)}
+          </audio>
+        );
+      },
+    ),
     useTracks: vi.fn(),
   };
 });
@@ -285,4 +287,28 @@ it("should setup audioContext gain and pan", () => {
 
   expect(testAudioContext.gain.gain.value).toEqual(0.1);
   expect(testAudioContext.pan.pan.value).toEqual(1);
+});
+
+it("keeps the audio element muted while routed through web audio", () => {
+  vi.spyOn(MediaDevicesContext, "useEarpieceAudioConfig").mockReturnValue({
+    pan: 1,
+    volume: 1,
+  });
+
+  const { getByTestId } = renderTestComponent(
+    [{ userId: "@bob", deviceId: "DEV0" }],
+    ["@bob:DEV0"],
+  );
+  const el = getByTestId("audio") as HTMLAudioElement;
+
+  // The element is muted as soon as web audio routing is active.
+  expect(el.muted).toBe(true);
+
+  // Room.startAudio() and remote unmute handling set element.muted = false
+  // behind our back; the browser fires "volumechange" for that, which must
+  // re-assert the mute (otherwise WKWebView plays the raw track at full
+  // volume alongside the web audio graph).
+  el.muted = false;
+  el.dispatchEvent(new Event("volumechange"));
+  expect(el.muted).toBe(true);
 });

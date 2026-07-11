@@ -8,7 +8,7 @@ Please see LICENSE in the repository root for full details.
 import { getTrackReferenceId } from "@livekit/components-core";
 import { type Room as LivekitRoom } from "livekit-client";
 import { type RemoteAudioTrack, Track } from "livekit-client";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   useTracks,
   AudioTrack,
@@ -201,6 +201,8 @@ function AudioTrackWithAudioNodes({
     [audioContext && audioNodes],
   );
 
+  const audioEl = useRef<HTMLAudioElement | null>(null);
+
   useEffect(() => {
     if (!trackRef || trackReady) return;
     const track = trackRef.publication.track as RemoteAudioTrack;
@@ -213,7 +215,30 @@ function AudioTrackWithAudioNodes({
     controls.setPlaybackStarted();
   }, [audioContext, audioNodes, setTrackReady, trackReady, trackRef]);
 
+  // While the track is routed through the audio context, the <audio> element
+  // must stay muted: livekit-client mutes it when connecting Web Audio, but
+  // Room.startAudio() (triggered by AudioStreamAcquired and visibility
+  // changes) and remote unmute handling set element.muted = false again.
+  // Chrome keeps the element silent anyway via the element.volume = 0 that
+  // livekit leaves behind, but WKWebView ignores element volume, so an
+  // unmuted element plays the raw track at full volume on top of the Web
+  // Audio graph — doubling the audio and bypassing the gain node that the
+  // volume slider controls. Setting `muted` fires "volumechange", so we can
+  // re-assert the mute whenever something lifts it.
+  useEffect(() => {
+    const el = audioEl.current;
+    if (!el || !audioContext || !trackReady) return;
+    const enforceMute = (): void => {
+      if (!el.muted) el.muted = true;
+    };
+    enforceMute();
+    el.addEventListener("volumechange", enforceMute);
+    return (): void => el.removeEventListener("volumechange", enforceMute);
+  }, [audioContext, trackReady]);
+
   return (
-    trackReady && <AudioTrack trackRef={trackRef} muted={muted} {...props} />
+    trackReady && (
+      <AudioTrack trackRef={trackRef} muted={muted} {...props} ref={audioEl} />
+    )
   );
 }
