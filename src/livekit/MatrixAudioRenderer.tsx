@@ -326,7 +326,7 @@ function AudioTrackWithAudioNodes({
       for (const sample of buffer) peak = Math.max(peak, Math.abs(sample - 128));
       const raw = audioEl.current;
       const processed = processedAudioEl.current;
-      prefixedLogger.info(
+      prefixedLogger.debug(
         `audio pipeline (${trackId}): context=${audioContext.state}`,
         `graphPeak=${peak}`,
         `raw(muted=${raw?.muted} paused=${raw?.paused})`,
