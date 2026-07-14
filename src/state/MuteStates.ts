@@ -24,6 +24,7 @@ import {
 } from "rxjs";
 
 import { type MediaDevices, type MediaDevice } from "../state/MediaDevices";
+import { setMicrophoneEnabled$ } from "../controls";
 import { ElementWidgetActions, widget } from "../widget";
 import { type ObservableScope } from "./ObservableScope";
 import { type Behavior, constant } from "./Behavior";
@@ -217,6 +218,23 @@ export class MuteStates {
       videoEnabled: boolean;
     },
   ) {
+    // Hosting clients drive push-to-talk / push-to-mute through
+    // window.controls.setMicrophoneEnabled. Route it through the same mute
+    // state as the in-call microphone button so the published track is truly
+    // muted (and, in widget mode, the DeviceMute sync below reports the
+    // resulting state back to the host).
+    setMicrophoneEnabled$
+      .pipe(withLatestFrom(this.audio.setEnabled$), this.scope.bind())
+      .subscribe(([enabled, setAudioEnabled]) => {
+        if (setAudioEnabled === null) {
+          logger.warn(
+            "setMicrophoneEnabled ignored: microphone is not controllable",
+          );
+          return;
+        }
+        setAudioEnabled(enabled);
+      });
+
     if (widget !== null) {
       // Sync our mute states with the hosting client
       const widgetApiState$ = combineLatest(
