@@ -11,6 +11,7 @@ import {
   type LocalParticipant,
   type ScreenShareCaptureOptions,
   type TrackPublishOptions,
+  AudioPresets,
   RoomEvent,
   MediaDeviceFailure,
 } from "livekit-client";
@@ -735,22 +736,63 @@ export const createLocalMembership$ = ({
     !getUrlParams().hideScreensharing
   ) {
     toggleScreenSharing = (): void => {
+      // System-loopback share audio (the only audio source in WebView2 on
+      // Windows) contains the remote participants' own playout. Upstream
+      // scrubs that back out by leaving echoCancellation enabled — but AEC
+      // forces the capture pipeline to mono and audibly dents share audio
+      // whenever anyone speaks. Where the browser supports restrictOwnAudio
+      // (Chromium incl. WebView2), the OS excludes this app's process tree
+      // from the loopback instead, so the call playout never enters the
+      // capture and the whole processing chain can be turned off for clean
+      // stereo. Elsewhere (tab audio in Chrome, Safari) the old trade-off
+      // stands.
+      const restrictOwnAudioSupported =
+        (
+          navigator.mediaDevices?.getSupportedConstraints?.() as
+            | (MediaTrackSupportedConstraints & {
+                restrictOwnAudio?: boolean;
+              })
+            | undefined
+        )?.restrictOwnAudio === true;
+
       const screenshareSettings: ScreenShareCaptureOptions = {
         // Screen share audio shouldn't have any filtering.
-        // "echoCancellation" is purposely excluded, as setting it to
-        // false causes the screen share audio track to include
-        // an echo of the incoming participant's voice
-        audio: {
-          autoGainControl: false,
-          noiseSuppression: false,
-          voiceIsolation: false,
-        },
+        // "echoCancellation" is purposely excluded in the fallback, as
+        // setting it to false causes the screen share audio track to
+        // include an echo of the incoming participants' voices.
+        audio: restrictOwnAudioSupported
+          ? ({
+              echoCancellation: false,
+              autoGainControl: false,
+              noiseSuppression: false,
+              voiceIsolation: false,
+              channelCount: 2,
+              restrictOwnAudio: true,
+            } as ScreenShareCaptureOptions["audio"])
+          : {
+              autoGainControl: false,
+              noiseSuppression: false,
+              voiceIsolation: false,
+            },
         selfBrowserSurface: "include",
         surfaceSwitching: "include",
         systemAudio: "include",
       };
 
       let publishOptions: TrackPublishOptions | undefined;
+      // With the processing chain off, the track is real stereo media —
+      // publish it like the native path does (music preset, no DTX/RED,
+      // explicit stereo so LiveKit does not downmix on channel-count
+      // misdetection).
+      const stereoAudioPublishOptions: Partial<TrackPublishOptions> =
+        restrictOwnAudioSupported
+          ? {
+              dtx: false,
+              red: false,
+              forceStereo: true,
+              audioPreset: AudioPresets.musicStereo,
+            }
+          : {};
 
       if (advancedScreenShare.getValue()) {
         // User has advanced screen share settings enabled
@@ -784,6 +826,10 @@ export const createLocalMembership$ = ({
             frameRate: screenConf.max_framerate ?? 30,
           };
         }
+      }
+
+      if (Object.keys(stereoAudioPublishOptions).length > 0) {
+        publishOptions = { ...publishOptions, ...stereoAudioPublishOptions };
       }
 
       const targetScreenshareState = !sharingScreen$.value;
