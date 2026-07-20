@@ -65,6 +65,14 @@ import { Slider } from "../Slider";
 import { platform } from "../Platform";
 import { type RingingMediaViewModel } from "../state/media/RingingMediaViewModel";
 
+/**
+ * How recently the user must have interacted (wheel, touch, pointer, keys,
+ * or the next/back buttons) for a scroll-snap position change to count as
+ * user-initiated. WebKit's momentum scrolling keeps emitting wheel events
+ * throughout, so real swipes continuously refresh the window.
+ */
+const SCROLL_INTENT_MS = 1000;
+
 interface SpotlightItemBaseProps {
   ref?: Ref<HTMLDivElement>;
   className?: string;
@@ -497,6 +505,26 @@ export const SpotlightTile: FC<Props> = ({
     };
   }, [ourRef]);
 
+  const [scrollToId, setScrollToId] = useReactiveState<string | null>(
+    (prev) =>
+      prev == null || prev === visibleId || media.every((vm) => vm.id !== prev)
+        ? null
+        : prev,
+    [visibleId],
+  );
+  const latestScrollToId = useLatest(scrollToId);
+
+  // WKWebView quirk guard: WebKit re-snaps a `mandatory` scroll-snap
+  // container whenever layout inside it changes — which the local screen
+  // share tile does repeatedly while native sharing on macOS — and lands on
+  // the first item, silently yanking the sharer back to their own share.
+  // Track when the user last actually initiated scrolling so those
+  // spontaneous jumps can be told apart and undone.
+  const lastScrollIntent = useRef(0);
+  const markScrollIntent = useCallback((): void => {
+    lastScrollIntent.current = Date.now();
+  }, []);
+
   // To keep track of which item is visible, we need an intersection observer
   // hooked up to the root element and the items. Because the items will run
   // their effects before their parent does, we need to do this dance with an
@@ -509,8 +537,30 @@ export const SpotlightTile: FC<Props> = ({
             new IntersectionObserver(
               (entries) => {
                 const visible = entries.find((e) => e.isIntersecting);
-                if (visible !== undefined)
-                  setVisibleId(visible.target.getAttribute("data-id")!);
+                if (visible === undefined) return;
+                const id = visible.target.getAttribute("data-id")!;
+                const prevId = latestVisibleId.current;
+                const userInitiated =
+                  latestScrollToId.current !== null ||
+                  Date.now() - lastScrollIntent.current < SCROLL_INTENT_MS;
+                if (
+                  userInitiated ||
+                  prevId === undefined ||
+                  id === prevId ||
+                  latestMedia.current.every((vm) => vm.id !== prevId)
+                ) {
+                  setVisibleId(id);
+                } else {
+                  // A scroll nobody asked for (WebKit re-snap after a layout
+                  // change): put the view back on the item the user chose.
+                  ourRef.current
+                    ?.querySelector(`[data-id="${CSS.escape(prevId)}"]`)
+                    ?.scrollIntoView({
+                      behavior: "instant",
+                      block: "nearest",
+                      inline: "start",
+                    });
+                }
               },
               { root: r, threshold: 0.5 },
             ),
@@ -518,30 +568,24 @@ export const SpotlightTile: FC<Props> = ({
       ),
   );
 
-  const [scrollToId, setScrollToId] = useReactiveState<string | null>(
-    (prev) =>
-      prev == null || prev === visibleId || media.every((vm) => vm.id !== prev)
-        ? null
-        : prev,
-    [visibleId],
-  );
-
   const onBackClick = useCallback(() => {
+    markScrollIntent();
     const media = latestMedia.current;
     const visibleIndex = media.findIndex(
       (vm) => vm.id === latestVisibleId.current,
     );
     if (visibleIndex > 0) setScrollToId(media[visibleIndex - 1].id);
-  }, [latestVisibleId, latestMedia, setScrollToId]);
+  }, [latestVisibleId, latestMedia, setScrollToId, markScrollIntent]);
 
   const onNextClick = useCallback(() => {
+    markScrollIntent();
     const media = latestMedia.current;
     const visibleIndex = media.findIndex(
       (vm) => vm.id === latestVisibleId.current,
     );
     if (visibleIndex !== -1 && visibleIndex !== media.length - 1)
       setScrollToId(media[visibleIndex + 1].id);
-  }, [latestVisibleId, latestMedia, setScrollToId]);
+  }, [latestVisibleId, latestMedia, setScrollToId, markScrollIntent]);
 
   const ToggleExpandIcon = expanded ? CollapseIcon : ExpandIcon;
 
@@ -563,7 +607,13 @@ export const SpotlightTile: FC<Props> = ({
           <ChevronLeftIcon aria-hidden width={24} height={24} />
         </button>
       )}
-      <div className={styles.contents}>
+      <div
+        className={styles.contents}
+        onWheelCapture={markScrollIntent}
+        onPointerDownCapture={markScrollIntent}
+        onTouchStartCapture={markScrollIntent}
+        onKeyDownCapture={markScrollIntent}
+      >
         {media.map((vm) => (
           <SpotlightItem
             key={vm.id}
