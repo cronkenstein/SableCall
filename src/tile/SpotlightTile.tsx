@@ -69,9 +69,13 @@ import { type RingingMediaViewModel } from "../state/media/RingingMediaViewModel
  * How recently the user must have interacted (wheel, touch, pointer, keys,
  * or the next/back buttons) for a scroll-snap position change to count as
  * user-initiated. WebKit's momentum scrolling keeps emitting wheel events
- * throughout, so real swipes continuously refresh the window.
+ * throughout, so real swipes continuously refresh the window. Kept short —
+ * and consumed once used — because WebKit's spontaneous re-snap fires
+ * immediately after a navigation settles (restoring the snap classes is
+ * itself the layout change that triggers it), well inside any window that
+ * merely measures time since the initiating click.
  */
-const SCROLL_INTENT_MS = 1000;
+const SCROLL_INTENT_MS = 300;
 
 interface SpotlightItemBaseProps {
   ref?: Ref<HTMLDivElement>;
@@ -549,6 +553,12 @@ export const SpotlightTile: FC<Props> = ({
                   id === prevId ||
                   latestMedia.current.every((vm) => vm.id !== prevId)
                 ) {
+                  // Consume the intent: it has justified this one view
+                  // change. The re-snap WebKit fires when the snap classes
+                  // are restored a frame after a navigation settles must
+                  // not inherit it, or it gets accepted and the guard then
+                  // defends the wrong item.
+                  if (id !== prevId) lastScrollIntent.current = 0;
                   setVisibleId(id);
                 } else {
                   // A scroll nobody asked for (WebKit re-snap after a layout
