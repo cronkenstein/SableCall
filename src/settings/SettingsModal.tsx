@@ -97,6 +97,318 @@ interface Props {
 
 export const defaultSettingsTab: SettingsTab = "audio";
 
+// The section components below are defined at module scope on purpose: they
+// used to be declared inside SettingsModal's body, which gives them a new
+// component identity on every parent render. React then unmounts and
+// remounts the whole section each time the modal re-renders (device
+// observables, setting updates...), closing any open native <select>
+// dropdown and resetting slider drags and scroll position — most visible as
+// the screen share quality dropdowns instantly dismissing on WebView2.
+
+// Generate a `Checkbox` input to turn blur on or off.
+const BlurCheckbox: FC = (): ReactNode => {
+  const { t } = useTranslation();
+  const { supported } = useTrackProcessor();
+
+  const [blurActive, setBlurActive] = useSetting(backgroundBlurSetting);
+
+  return (
+    <>
+      <h4>{t("settings.background_blur_header")}</h4>
+
+      <FieldRow>
+        <InputField
+          id="activateBackgroundBlur"
+          label={t("settings.background_blur_label")}
+          description={
+            supported ? "" : t("settings.blur_not_supported_by_browser")
+          }
+          type="checkbox"
+          checked={!!blurActive}
+          onChange={(b): void => setBlurActive(b.target.checked)}
+          disabled={!supported}
+        />
+      </FieldRow>
+    </>
+  );
+};
+
+const MediaQualitySettings: FC<{
+  id: string;
+  header: string;
+  toggleLabel: string;
+  description: string;
+  toggleSetting: Setting<boolean>;
+  resolutionSetting: Setting<string>;
+  framerateSetting: Setting<number>;
+  bitrateSetting: Setting<number>;
+  codecSetting: Setting<VideoCodec>;
+  resolutionOptions: { value: string; label: string }[];
+  bitrateRange: { min: number; max: number; step: number };
+}> = ({
+  id,
+  header,
+  toggleLabel,
+  description,
+  toggleSetting,
+  resolutionSetting,
+  framerateSetting,
+  bitrateSetting,
+  codecSetting,
+  resolutionOptions,
+  bitrateRange,
+}): ReactNode => {
+  const { t } = useTranslation();
+  const [advancedEnabled, setAdvancedEnabled] = useSetting(toggleSetting);
+  const [resolution, setResolution] = useSetting(resolutionSetting);
+  const [framerate, setFramerate] = useSetting(framerateSetting);
+  const [framerateRaw, setFramerateRaw] = useState(framerate);
+  const [bitrate, setBitrate] = useSetting(bitrateSetting);
+  const [bitrateRaw, setBitrateRaw] = useState(bitrate);
+  const [codec, setCodec] = useSetting(codecSetting);
+
+  return (
+    <>
+      <h4>{header}</h4>
+      <FieldRow>
+        <InputField
+          id={`${id}Toggle`}
+          label={toggleLabel}
+          description={description}
+          type="checkbox"
+          checked={advancedEnabled}
+          onChange={(e): void => setAdvancedEnabled(e.target.checked)}
+        />
+      </FieldRow>
+      {advancedEnabled && (
+        <>
+          <div className={styles.volumeSlider}>
+            <label htmlFor={`${id}Resolution`}>
+              {t("settings.resolution_label", "Resolution")}
+            </label>
+            <select
+              id={`${id}Resolution`}
+              value={resolution}
+              onChange={(e): void => setResolution(e.target.value)}
+            >
+              {resolutionOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className={styles.volumeSlider}>
+            <label>
+              {t("settings.framerate_label", "Framerate")}
+              {": "}
+              <span className={styles.settingValue}>{framerateRaw} fps</span>
+            </label>
+            <Slider
+              label={t("settings.framerate_label", "Framerate")}
+              value={framerateRaw}
+              onValueChange={setFramerateRaw}
+              onValueCommit={setFramerate}
+              min={5}
+              max={60}
+              step={5}
+              tooltipFormatter={(v): string => `${v} fps`}
+            />
+          </div>
+          <div className={styles.volumeSlider}>
+            <label>
+              {t("settings.bitrate_label", "Bitrate")}
+              {": "}
+              <span className={styles.settingValue}>
+                {(bitrateRaw / 1_000_000).toFixed(1)} Mbps
+              </span>
+            </label>
+            <Slider
+              label={t("settings.bitrate_label", "Bitrate")}
+              value={bitrateRaw}
+              onValueChange={setBitrateRaw}
+              onValueCommit={setBitrate}
+              min={bitrateRange.min}
+              max={bitrateRange.max}
+              step={bitrateRange.step}
+              tooltipFormatter={(v): string =>
+                `${(v / 1_000_000).toFixed(1)} Mbps`
+              }
+            />
+          </div>
+          <div className={styles.volumeSlider}>
+            <label htmlFor={`${id}Codec`}>
+              {t("settings.codec_label", "Codec")}
+            </label>
+            <select
+              id={`${id}Codec`}
+              value={codec}
+              onChange={(e): void => setCodec(e.target.value as VideoCodec)}
+            >
+              <option value="vp8">VP8</option>
+              <option value="vp9">VP9</option>
+              <option value="h264">H.264</option>
+              <option value="av1">AV1</option>
+            </select>
+          </div>
+        </>
+      )}
+    </>
+  );
+};
+
+const RNNoiseCheckbox: FC = (): ReactNode => {
+  const { t } = useTranslation();
+  const supported = supportsRNNoiseProcessor();
+  const [rnnoiseEnabled, setRnnoiseEnabled] = useSetting(
+    rnnoiseNoiseSuppressionSetting,
+  );
+  const [rnnoisePreset, setRnnoisePreset] = useSetting(
+    rnnoiseNoiseSuppressionPresetSetting,
+  );
+  const rnnoisePresetGroup = useId();
+
+  const onPresetChange = (e: ChangeEvent<HTMLInputElement>): void => {
+    setRnnoisePreset(e.target.value as RNNoiseSuppressionPreset);
+  };
+
+  const presetLabelByPreset: Record<RNNoiseSuppressionPreset, string> = {
+    conservative: t("settings.audio_tab.rnnoise_preset_conservative"),
+    balanced: t("settings.audio_tab.rnnoise_preset_balanced"),
+    strong: t("settings.audio_tab.rnnoise_preset_strong"),
+  };
+  const effectiveRnnoiseEnabled = supported && !!rnnoiseEnabled;
+
+  return (
+    <>
+      <h4>{t("settings.audio_tab.rnnoise_header")}</h4>
+      <FieldRow>
+        <InputField
+          id="activateRNNoiseSuppression"
+          label={t("settings.audio_tab.rnnoise_label")}
+          description={
+            supported ? "" : t("settings.audio_tab.rnnoise_not_supported")
+          }
+          type="checkbox"
+          checked={effectiveRnnoiseEnabled}
+          onChange={(e): void => setRnnoiseEnabled(e.target.checked)}
+          disabled={!supported}
+        />
+      </FieldRow>
+      {effectiveRnnoiseEnabled && (
+        <>
+          <p>{t("settings.audio_tab.rnnoise_preset_description")}</p>
+          {rnnoiseSuppressionPresets.map((preset) => (
+            <InlineField
+              key={preset}
+              name={rnnoisePresetGroup}
+              control={
+                <RadioControl
+                  checked={rnnoisePreset === preset}
+                  value={preset}
+                  onChange={onPresetChange}
+                  disabled={!supported}
+                />
+              }
+            >
+              <Label>{presetLabelByPreset[preset]}</Label>
+            </InlineField>
+          ))}
+        </>
+      )}
+    </>
+  );
+};
+
+const AudioProcessingSettings: FC = (): ReactNode => {
+  const { t } = useTranslation();
+  const [echoCancellation, setEchoCancellation] = useSetting(
+    echoCancellationSetting,
+  );
+  const [noiseSuppression, setNoiseSuppression] = useSetting(
+    noiseSuppressionSetting,
+  );
+  const [autoGainControl, setAutoGainControl] = useSetting(
+    autoGainControlSetting,
+  );
+  const [rnnoiseEnabled] = useSetting(rnnoiseNoiseSuppressionSetting);
+  const rnnoiseSupported = supportsRNNoiseProcessor();
+  const rnnoiseOverridesNative = rnnoiseEnabled && rnnoiseSupported;
+
+  return (
+    <>
+      <h4>{t("settings.audio_processing_header", "Audio processing")}</h4>
+      <p>
+        {t(
+          "settings.audio_processing_description",
+          "Changes apply on next call join.",
+        )}
+      </p>
+      <FieldRow>
+        <InputField
+          id="echoCancellation"
+          label={t("settings.echo_cancellation_label", "Echo cancellation")}
+          type="checkbox"
+          checked={echoCancellation}
+          onChange={(e): void => setEchoCancellation(e.target.checked)}
+        />
+      </FieldRow>
+      <FieldRow>
+        <InputField
+          id="noiseSuppression"
+          label={t("settings.noise_suppression_label", "Noise suppression")}
+          description={
+            rnnoiseOverridesNative
+              ? t(
+                  "settings.noise_suppression_rnnoise_override",
+                  "Overridden by RNNoise.",
+                )
+              : ""
+          }
+          type="checkbox"
+          checked={!rnnoiseOverridesNative && noiseSuppression}
+          onChange={(e): void => setNoiseSuppression(e.target.checked)}
+          disabled={rnnoiseOverridesNative}
+        />
+      </FieldRow>
+      <FieldRow>
+        <InputField
+          id="autoGainControl"
+          label={t(
+            "settings.auto_gain_control_label",
+            "Automatic gain control",
+          )}
+          type="checkbox"
+          checked={autoGainControl}
+          onChange={(e): void => setAutoGainControl(e.target.checked)}
+        />
+      </FieldRow>
+    </>
+  );
+};
+
+const PipSetting: FC = (): ReactNode => {
+  const { t } = useTranslation();
+  const [allowPip, setAllowPip] = useSetting(allowPipSetting);
+
+  return (
+    <>
+      <FieldRow>
+        <InputField
+          id="allowPip"
+          label={t(
+            "settings.allow_pip_label",
+            "Allow Browser Picture In Picture",
+          )}
+          type="checkbox"
+          checked={allowPip}
+          onChange={(e): void => setAllowPip(e.target.checked)}
+        />
+      </FieldRow>
+    </>
+  );
+};
+
 export const SettingsModal: FC<Props> = ({
   open,
   onDismiss,
@@ -107,305 +419,6 @@ export const SettingsModal: FC<Props> = ({
   livekitRooms,
 }) => {
   const { t } = useTranslation();
-
-  // Generate a `Checkbox` input to turn blur on or off.
-  const BlurCheckbox: React.FC = (): ReactNode => {
-    const { supported } = useTrackProcessor();
-
-    const [blurActive, setBlurActive] = useSetting(backgroundBlurSetting);
-
-    return (
-      <>
-        <h4>{t("settings.background_blur_header")}</h4>
-
-        <FieldRow>
-          <InputField
-            id="activateBackgroundBlur"
-            label={t("settings.background_blur_label")}
-            description={
-              supported ? "" : t("settings.blur_not_supported_by_browser")
-            }
-            type="checkbox"
-            checked={!!blurActive}
-            onChange={(b): void => setBlurActive(b.target.checked)}
-            disabled={!supported}
-          />
-        </FieldRow>
-      </>
-    );
-  };
-
-  const MediaQualitySettings: React.FC<{
-    id: string;
-    header: string;
-    toggleLabel: string;
-    description: string;
-    toggleSetting: Setting<boolean>;
-    resolutionSetting: Setting<string>;
-    framerateSetting: Setting<number>;
-    bitrateSetting: Setting<number>;
-    codecSetting: Setting<VideoCodec>;
-    resolutionOptions: { value: string; label: string }[];
-    bitrateRange: { min: number; max: number; step: number };
-  }> = ({
-    id,
-    header,
-    toggleLabel,
-    description,
-    toggleSetting,
-    resolutionSetting,
-    framerateSetting,
-    bitrateSetting,
-    codecSetting,
-    resolutionOptions,
-    bitrateRange,
-  }): ReactNode => {
-    const [advancedEnabled, setAdvancedEnabled] = useSetting(toggleSetting);
-    const [resolution, setResolution] = useSetting(resolutionSetting);
-    const [framerate, setFramerate] = useSetting(framerateSetting);
-    const [framerateRaw, setFramerateRaw] = useState(framerate);
-    const [bitrate, setBitrate] = useSetting(bitrateSetting);
-    const [bitrateRaw, setBitrateRaw] = useState(bitrate);
-    const [codec, setCodec] = useSetting(codecSetting);
-
-    return (
-      <>
-        <h4>{header}</h4>
-        <FieldRow>
-          <InputField
-            id={`${id}Toggle`}
-            label={toggleLabel}
-            description={description}
-            type="checkbox"
-            checked={advancedEnabled}
-            onChange={(e): void => setAdvancedEnabled(e.target.checked)}
-          />
-        </FieldRow>
-        {advancedEnabled && (
-          <>
-            <div className={styles.volumeSlider}>
-              <label htmlFor={`${id}Resolution`}>
-                {t("settings.resolution_label", "Resolution")}
-              </label>
-              <select
-                id={`${id}Resolution`}
-                value={resolution}
-                onChange={(e): void => setResolution(e.target.value)}
-              >
-                {resolutionOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className={styles.volumeSlider}>
-              <label>
-                {t("settings.framerate_label", "Framerate")}
-                {": "}
-                <span className={styles.settingValue}>{framerateRaw} fps</span>
-              </label>
-              <Slider
-                label={t("settings.framerate_label", "Framerate")}
-                value={framerateRaw}
-                onValueChange={setFramerateRaw}
-                onValueCommit={setFramerate}
-                min={5}
-                max={60}
-                step={5}
-                tooltipFormatter={(v): string => `${v} fps`}
-              />
-            </div>
-            <div className={styles.volumeSlider}>
-              <label>
-                {t("settings.bitrate_label", "Bitrate")}
-                {": "}
-                <span className={styles.settingValue}>
-                  {(bitrateRaw / 1_000_000).toFixed(1)} Mbps
-                </span>
-              </label>
-              <Slider
-                label={t("settings.bitrate_label", "Bitrate")}
-                value={bitrateRaw}
-                onValueChange={setBitrateRaw}
-                onValueCommit={setBitrate}
-                min={bitrateRange.min}
-                max={bitrateRange.max}
-                step={bitrateRange.step}
-                tooltipFormatter={(v): string =>
-                  `${(v / 1_000_000).toFixed(1)} Mbps`
-                }
-              />
-            </div>
-            <div className={styles.volumeSlider}>
-              <label htmlFor={`${id}Codec`}>
-                {t("settings.codec_label", "Codec")}
-              </label>
-              <select
-                id={`${id}Codec`}
-                value={codec}
-                onChange={(e): void => setCodec(e.target.value as VideoCodec)}
-              >
-                <option value="vp8">VP8</option>
-                <option value="vp9">VP9</option>
-                <option value="h264">H.264</option>
-                <option value="av1">AV1</option>
-              </select>
-            </div>
-          </>
-        )}
-      </>
-    );
-  };
-
-  const RNNoiseCheckbox: React.FC = (): ReactNode => {
-    const supported = supportsRNNoiseProcessor();
-    const [rnnoiseEnabled, setRnnoiseEnabled] = useSetting(
-      rnnoiseNoiseSuppressionSetting,
-    );
-    const [rnnoisePreset, setRnnoisePreset] = useSetting(
-      rnnoiseNoiseSuppressionPresetSetting,
-    );
-    const rnnoisePresetGroup = useId();
-
-    const onPresetChange = (e: ChangeEvent<HTMLInputElement>): void => {
-      setRnnoisePreset(e.target.value as RNNoiseSuppressionPreset);
-    };
-
-    const presetLabelByPreset: Record<RNNoiseSuppressionPreset, string> = {
-      conservative: t("settings.audio_tab.rnnoise_preset_conservative"),
-      balanced: t("settings.audio_tab.rnnoise_preset_balanced"),
-      strong: t("settings.audio_tab.rnnoise_preset_strong"),
-    };
-    const effectiveRnnoiseEnabled = supported && !!rnnoiseEnabled;
-
-    return (
-      <>
-        <h4>{t("settings.audio_tab.rnnoise_header")}</h4>
-        <FieldRow>
-          <InputField
-            id="activateRNNoiseSuppression"
-            label={t("settings.audio_tab.rnnoise_label")}
-            description={
-              supported ? "" : t("settings.audio_tab.rnnoise_not_supported")
-            }
-            type="checkbox"
-            checked={effectiveRnnoiseEnabled}
-            onChange={(e): void => setRnnoiseEnabled(e.target.checked)}
-            disabled={!supported}
-          />
-        </FieldRow>
-        {effectiveRnnoiseEnabled && (
-          <>
-            <p>{t("settings.audio_tab.rnnoise_preset_description")}</p>
-            {rnnoiseSuppressionPresets.map((preset) => (
-              <InlineField
-                key={preset}
-                name={rnnoisePresetGroup}
-                control={
-                  <RadioControl
-                    checked={rnnoisePreset === preset}
-                    value={preset}
-                    onChange={onPresetChange}
-                    disabled={!supported}
-                  />
-                }
-              >
-                <Label>{presetLabelByPreset[preset]}</Label>
-              </InlineField>
-            ))}
-          </>
-        )}
-      </>
-    );
-  };
-
-  const AudioProcessingSettings: React.FC = (): ReactNode => {
-    const [echoCancellation, setEchoCancellation] = useSetting(
-      echoCancellationSetting,
-    );
-    const [noiseSuppression, setNoiseSuppression] = useSetting(
-      noiseSuppressionSetting,
-    );
-    const [autoGainControl, setAutoGainControl] = useSetting(
-      autoGainControlSetting,
-    );
-    const [rnnoiseEnabled] = useSetting(rnnoiseNoiseSuppressionSetting);
-    const rnnoiseSupported = supportsRNNoiseProcessor();
-    const rnnoiseOverridesNative = rnnoiseEnabled && rnnoiseSupported;
-
-    return (
-      <>
-        <h4>{t("settings.audio_processing_header", "Audio processing")}</h4>
-        <p>
-          {t(
-            "settings.audio_processing_description",
-            "Changes apply on next call join.",
-          )}
-        </p>
-        <FieldRow>
-          <InputField
-            id="echoCancellation"
-            label={t("settings.echo_cancellation_label", "Echo cancellation")}
-            type="checkbox"
-            checked={echoCancellation}
-            onChange={(e): void => setEchoCancellation(e.target.checked)}
-          />
-        </FieldRow>
-        <FieldRow>
-          <InputField
-            id="noiseSuppression"
-            label={t("settings.noise_suppression_label", "Noise suppression")}
-            description={
-              rnnoiseOverridesNative
-                ? t(
-                    "settings.noise_suppression_rnnoise_override",
-                    "Overridden by RNNoise.",
-                  )
-                : ""
-            }
-            type="checkbox"
-            checked={!rnnoiseOverridesNative && noiseSuppression}
-            onChange={(e): void => setNoiseSuppression(e.target.checked)}
-            disabled={rnnoiseOverridesNative}
-          />
-        </FieldRow>
-        <FieldRow>
-          <InputField
-            id="autoGainControl"
-            label={t(
-              "settings.auto_gain_control_label",
-              "Automatic gain control",
-            )}
-            type="checkbox"
-            checked={autoGainControl}
-            onChange={(e): void => setAutoGainControl(e.target.checked)}
-          />
-        </FieldRow>
-      </>
-    );
-  };
-
-  const PipSetting: React.FC = (): ReactNode => {
-    const [allowPip, setAllowPip] = useSetting(allowPipSetting);
-
-    return (
-      <>
-        <FieldRow>
-          <InputField
-            id="allowPip"
-            label={t(
-              "settings.allow_pip_label",
-              "Allow Browser Picture In Picture",
-            )}
-            type="checkbox"
-            checked={allowPip}
-            onChange={(e): void => setAllowPip(e.target.checked)}
-          />
-        </FieldRow>
-      </>
-    );
-  };
 
   const devices = useMediaDevices();
   useEffect(() => {
