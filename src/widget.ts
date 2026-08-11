@@ -57,6 +57,17 @@ export enum ElementWidgetActions {
   ScreenShareStop = "io.sable.screen_share.stop",
   // fromWidget: report publish state changes/errors ({ active, error }).
   ScreenShareStatus = "io.sable.screen_share.status",
+  // Linux app-audio bridge: video capture stays on getDisplayMedia, but
+  // the audio track comes from a host-routed PipeWire virtual source
+  // (Chromium on Linux can only offer whole-system loopback). See
+  // AppAudioShare.ts; mirrored in Sable's src/app/plugins/call/types.ts.
+  //
+  // fromWidget: ask which audio to attach before capture starts.
+  ScreenShareAppAudioRequest = "io.sable.screen_share.app_audio_request",
+  // toWidget: the user's choice ({ audio, deviceLabel? }).
+  ScreenShareAppAudioSelect = "io.sable.screen_share.app_audio_select",
+  // fromWidget: the share ended; the host tears the routing down.
+  ScreenShareAppAudioStopped = "io.sable.screen_share.app_audio_stopped",
 }
 
 export interface JoinCallData {
@@ -129,6 +140,7 @@ export const initializeWidget = (
         ElementWidgetActions.DeviceMute,
         ElementWidgetActions.ScreenShareStart,
         ElementWidgetActions.ScreenShareStop,
+        ElementWidgetActions.ScreenShareAppAudioSelect,
       ].forEach((action) => {
         api.on(`action:${action}`, (ev: CustomEvent<IWidgetApiRequest>) => {
           ev.preventDefault();

@@ -248,6 +248,16 @@ export interface UrlConfiguration {
    */
   nativeScreenShare?: boolean;
 
+  /**
+   * Whether the hosting client routes screen share *audio* host-side
+   * (Linux Tauri: per-app PipeWire virtual source). Video still uses
+   * getDisplayMedia; before capture starts, the widget asks the host
+   * which audio to attach via the io.sable.screen_share.app_audio_*
+   * actions and captures the returned virtual device instead of
+   * requesting system audio from the browser.
+   */
+  screenShareAppAudio?: boolean;
+
   callIntent?: RTCCallIntent;
 }
 
@@ -494,6 +504,7 @@ export const computeUrlParams = (search = "", hash = ""): UrlParams => {
     noiseSuppression: parser.getFlagParam("noiseSuppression", true),
     echoCancellation: parser.getFlagParam("echoCancellation", true),
     nativeScreenShare: parser.getFlag("nativeScreenShare"),
+    screenShareAppAudio: parser.getFlag("screenShareAppAudio"),
   };
 
   // Log the final configuration for debugging purposes.

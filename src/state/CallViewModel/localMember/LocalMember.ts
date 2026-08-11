@@ -78,6 +78,7 @@ import {
   isNativeScreenShareMode,
   NativeScreenShareManager,
 } from "./NativeScreenShare.ts";
+import { isAppAudioShareMode, AppAudioShareManager } from "./AppAudioShare.ts";
 
 export enum TransportState {
   /** Not even a transport is available to the LocalMembership */
@@ -734,6 +735,19 @@ export const createLocalMembership$ = ({
     "getDisplayMedia" in (navigator.mediaDevices ?? {}) &&
     !getUrlParams().hideScreensharing
   ) {
+    // Linux Tauri: audio comes from a host-routed PipeWire virtual source
+    // (per-app selection) instead of the browser's whole-system loopback.
+    // Video capture below is identical either way.
+    let appAudioShare: AppAudioShareManager | null = null;
+    if (isAppAudioShareMode()) {
+      const manager = new AppAudioShareManager(participant$, logger);
+      appAudioShare = manager;
+      NEVER.pipe(
+        scope.bind(),
+        finalize(() => manager.dispose()),
+      ).subscribe();
+    }
+
     toggleScreenSharing = (): void => {
       const screenshareSettings: ScreenShareCaptureOptions = {
         // Screen share audio shouldn't have any filtering.
@@ -792,6 +806,16 @@ export const createLocalMembership$ = ({
           targetScreenshareState ? "On" : "Off"
         }`,
       );
+
+      if (appAudioShare) {
+        appAudioShare.toggle(
+          targetScreenshareState,
+          screenshareSettings,
+          publishOptions,
+        );
+        return;
+      }
+
       // If a connection is ready, toggle screen sharing.
       // We deliberately do nothing in the case of a null connection because
       // it looks nice for the call control buttons to all become available
