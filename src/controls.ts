@@ -18,6 +18,12 @@ export interface Controls {
   onAudioDeviceSelect?: (id: string) => void;
   onAudioPlaybackStarted?: () => void;
   setAudioEnabled(enabled: boolean): void;
+  /**
+   * Mutes/unmutes the local microphone (the published input track), unlike
+   * setAudioEnabled which mutes all audio *output*. Used by hosting clients
+   * for push-to-talk / push-to-mute.
+   */
+  setMicrophoneEnabled(enabled: boolean): void;
   showNativeAudioDevicePicker?: () => void;
   onBackButtonPressed?: () => void;
 
@@ -93,6 +99,15 @@ export const outputDevice$ = new Subject<string>();
  */
 export const setAudioEnabled$ = new Subject<boolean>();
 
+/**
+ * Local microphone mute control for hosting clients (push-to-talk /
+ * push-to-mute). Observed per call session by MuteStates, which routes it to
+ * the same mute state the in-call microphone button uses, so the published
+ * track is truly muted and the state is reported back over the widget
+ * DeviceMute action.
+ */
+export const setMicrophoneEnabled$ = new Subject<boolean>();
+
 let playbackStartedEmitted = false;
 export const setPlaybackStarted = (): void => {
   if (!playbackStartedEmitted) {
@@ -154,6 +169,17 @@ window.controls = {
         "Output controls are disabled. No setAudioEnabled$ observer",
       );
     setAudioEnabled$.next(enabled);
+  },
+  setMicrophoneEnabled(enabled: boolean): void {
+    logger.info(
+      "[MediaDevices controls] setMicrophoneEnabled called from host:",
+      enabled,
+    );
+    if (!setMicrophoneEnabled$.observed)
+      logger.warn(
+        "setMicrophoneEnabled called with no active call; ignoring",
+      );
+    setMicrophoneEnabled$.next(enabled);
   },
 
   // wrappers for the deprecated controls fields

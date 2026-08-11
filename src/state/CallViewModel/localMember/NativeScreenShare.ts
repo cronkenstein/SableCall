@@ -162,18 +162,33 @@ function videoPublishOptions(frameRate: number): TrackPublishOptions {
  * a MessagePort handed over in a `{ port }` handshake message (wired to the
  * media worker so audio survives main-thread throttling).
  *
- * Latency control:
- * - linear-interpolation resampling at chunkRate / contextRate;
- * - playback-rate nudge (±2%) steering fill toward TARGET_SEC, which
- *   cancels clock drift between capture and the audio device;
- * - hard drop of oldest chunks back to TARGET_SEC when fill exceeds
- *   MAX_SEC, keeping the share-side delay inside the 80ms budget;
- * - underruns re-enter prebuffering rather than splicing silence into the
- *   middle of the stream.
+ * Latency control (steady state stays inside the 80ms share-side budget,
+ * BASE_TARGET_SEC; the target adapts up to MAX_TARGET_SEC when delivery
+ * proves bursty, because audible gaps are worse than temporary latency):
+ * - linear-interpolation resampling at chunkRate / contextRate, which also
+ *   absorbs an AudioContext that did not honor the requested sample rate;
+ * - playback-rate nudge (±MAX_RATE_NUDGE) steering fill toward the current
+ *   target, which cancels clock drift between capture and playout;
+ * - trough-based adaptation: the buffer level oscillates with the delivery
+ *   cadence, so the windowed MINIMUM — not the instantaneous level — decides
+ *   headroom. Thin troughs grow the target before an underrun happens;
+ *   decay only happens while the trough is provably safe. Likewise latency
+ *   removal is trough-judged: clipping transient cadence peaks starves the
+ *   next inter-burst gap (learned the hard way), so only a trough
+ *   persistently above target is dropped; HARD_CLAMP_SEC still cuts a
+ *   single huge backlog burst (e.g. delivery resuming after a stall);
+ * - underruns bump the target immediately and re-enter prebuffering rather
+ *   than splicing silence into the middle of the stream.
  *
  * Declicking: every discontinuity (drop or underrun) fades the new audio in
  * over FADE_SEC while the last sample decays with TAIL_TAU_SEC, so drops
- * produce a soft thump instead of a sharp click.
+ * produce a soft thump instead of a sharp click. lastOut must track every
+ * emitted sample (including the decaying tail), or a crossfade after a long
+ * stall resurrects a stale full-scale sample as an audible pop.
+ *
+ * Verified by simulation against clock skew, sample-rate mismatch, stalls,
+ * and bursty (fullscreen-contention) delivery. Before tuning ANY constant
+ * here, run: node scripts/native-screenshare/worklet-sim.mjs
  */
 const AUDIO_SINK_WORKLET = `
 const BASE_TARGET_SEC = ${BASE_TARGET_SEC};
@@ -430,12 +445,15 @@ let pendingWrite = false;
 // rebase to zero so the encoder sees a sane, monotonic timeline.
 let baseTimestamp = null;
 
-// KEEP-ALIVE — load-bearing, do not remove. When the hosting window is
-// fully occluded (e.g. the sharer views a fullscreen Space), macOS
-// deschedules the WebContent process ~5-10s after occlusion despite the
-// host's scheduling knobs, starving the entire bridge (video and audio).
-// Periodic observable activity defeats the idle heuristic. This was
-// discovered when 5s diagnostics accidentally fixed the stutter.
+// Keep-alive tick — defense in depth, not the primary fix. When the
+// hosting window is fully occluded (the sharer viewing any fullscreen
+// Space), WebKit throttles the hidden page's media pipeline ~5-10s in.
+// The PRIMARY fix is the audibility exemption in the manager (inaudible
+// tone to the real output marks the page as audibly playing). This tick
+// additionally keeps periodic observable activity on the worker and main
+// thread; an activity-only defense proved unreliable on its own (the same
+// build both masked and exhibited the stutter), but it costs nearly
+// nothing and guards heuristics we do not control.
 const keepAliveTimer = setInterval(() => {
   self.postMessage({ type: "tick" });
 }, 2000);
@@ -1132,10 +1150,9 @@ export class NativeScreenShareManager {
         break;
       }
       case "tick":
-        // Keep-alive from the worker (see MEDIA_WORKER): receiving it here
-        // puts a task on the main thread every 2s, which together with the
-        // worker's timer keeps macOS from descheduling this process while
-        // the hosting window is occluded. Intentionally does nothing.
+        // Keep-alive from the worker (see MEDIA_WORKER): a no-op main-thread
+        // task every 2s, secondary defense against occluded-page throttling
+        // (the primary fix is the audibility exemption below).
         break;
       case "stats":
         // Mirrors the host-side heartbeat: recv counts show what crossed

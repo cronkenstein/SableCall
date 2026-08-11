@@ -11,8 +11,10 @@ import {
   type LocalParticipant,
   type ScreenShareCaptureOptions,
   type TrackPublishOptions,
+  AudioPresets,
   RoomEvent,
   MediaDeviceFailure,
+  Track,
 } from "livekit-client";
 import { observeParticipantEvents } from "@livekit/components-core";
 import {
@@ -735,9 +737,20 @@ export const createLocalMembership$ = ({
     "getDisplayMedia" in (navigator.mediaDevices ?? {}) &&
     !getUrlParams().hideScreensharing
   ) {
+    // Share-audio degradation ladder. The system loopback stream is what
+    // kills shares on some Windows machines (WAIS::Open NO_ENDPOINT →
+    // Chromium ends the video track as collateral), so when a share start
+    // fails for a non-user-cancel reason, the NEXT attempt drops one rung:
+    // 0 = restrictOwnAudio stereo, 1 = legacy loopback (AEC), 2 = no share
+    // audio. An in-place retry is impossible — the click's transient
+    // activation has expired by the time the audio open fails — so the
+    // ladder heals across attempts instead. Per call session.
+    let shareAudioTier = 0;
+
     // Linux Tauri: audio comes from a host-routed PipeWire virtual source
-    // (per-app selection) instead of the browser's whole-system loopback.
-    // Video capture below is identical either way.
+    // (per-app selection) instead of the browser's whole-system loopback,
+    // so the ladder above never comes into play unless the host falls
+    // back to browser audio. Video capture below is identical either way.
     let appAudioShare: AppAudioShareManager | null = null;
     if (isAppAudioShareMode()) {
       const manager = new AppAudioShareManager(participant$, logger);
@@ -749,22 +762,66 @@ export const createLocalMembership$ = ({
     }
 
     toggleScreenSharing = (): void => {
+      // System-loopback share audio (the only audio source in WebView2 on
+      // Windows) contains the remote participants' own playout. Upstream
+      // scrubs that back out by leaving echoCancellation enabled — but AEC
+      // forces the capture pipeline to mono and audibly dents share audio
+      // whenever anyone speaks. Where the browser supports restrictOwnAudio
+      // (Chromium incl. WebView2), the OS excludes this app's process tree
+      // from the loopback instead, so the call playout never enters the
+      // capture and the whole processing chain can be turned off for clean
+      // stereo. Elsewhere (tab audio in Chrome, Safari) the old trade-off
+      // stands.
+      const restrictOwnAudioSupported =
+        (
+          navigator.mediaDevices?.getSupportedConstraints?.() as
+            | (MediaTrackSupportedConstraints & {
+                restrictOwnAudio?: boolean;
+              })
+            | undefined
+        )?.restrictOwnAudio === true;
+
       const screenshareSettings: ScreenShareCaptureOptions = {
         // Screen share audio shouldn't have any filtering.
-        // "echoCancellation" is purposely excluded, as setting it to
-        // false causes the screen share audio track to include
-        // an echo of the incoming participant's voice
-        audio: {
-          autoGainControl: false,
-          noiseSuppression: false,
-          voiceIsolation: false,
-        },
+        // "echoCancellation" is purposely excluded in the fallback, as
+        // setting it to false causes the screen share audio track to
+        // include an echo of the incoming participants' voices.
+        audio:
+          restrictOwnAudioSupported && shareAudioTier === 0
+            ? ({
+                echoCancellation: false,
+                autoGainControl: false,
+                noiseSuppression: false,
+                voiceIsolation: false,
+                channelCount: 2,
+                restrictOwnAudio: true,
+              } as ScreenShareCaptureOptions["audio"])
+            : shareAudioTier <= 1
+              ? {
+                  autoGainControl: false,
+                  noiseSuppression: false,
+                  voiceIsolation: false,
+                }
+              : false,
         selfBrowserSurface: "include",
         surfaceSwitching: "include",
         systemAudio: "include",
       };
 
       let publishOptions: TrackPublishOptions | undefined;
+      // With the processing chain off, the track is real stereo media —
+      // publish it like the native path does (music preset, no DTX/RED,
+      // explicit stereo so LiveKit does not downmix on channel-count
+      // misdetection).
+      const stereoAudioPublishOptions: Partial<TrackPublishOptions> =
+        restrictOwnAudioSupported && shareAudioTier === 0
+          ? {
+              dtx: false,
+              red: false,
+              forceStereo: true,
+              audioPreset: AudioPresets.musicStereo,
+            }
+          : {};
 
       if (advancedScreenShare.getValue()) {
         // User has advanced screen share settings enabled
@@ -800,11 +857,15 @@ export const createLocalMembership$ = ({
         }
       }
 
+      if (Object.keys(stereoAudioPublishOptions).length > 0) {
+        publishOptions = { ...publishOptions, ...stereoAudioPublishOptions };
+      }
+
       const targetScreenshareState = !sharingScreen$.value;
       logger.info(
         `toggleScreenSharing called. Switching ${
           targetScreenshareState ? "On" : "Off"
-        }`,
+        } (shareAudioTier=${shareAudioTier})`,
       );
 
       if (appAudioShare) {
@@ -830,7 +891,86 @@ export const createLocalMembership$ = ({
           screenshareSettings,
           publishOptions,
         )
-        .catch(logger.error);
+        .then((publication) => {
+          if (!targetScreenshareState || !publication) return;
+          // Diagnostics for shares that die spontaneously (observed on
+          // Windows/WebView2: window capture of a fullscreen browser ends
+          // after ~1 min). Both share tracks are watched so the log shows
+          // which one the OS kills first — the WGC video capture or the
+          // loopback audio stream (whose failure ends the video as
+          // collateral) — versus LiveKit unpublishing for connection
+          // reasons (unpublish log without a preceding ended).
+          const track = publication.track?.mediaStreamTrack;
+          if (!track) return;
+          const startedAt = Date.now();
+          const ageSec = (): number =>
+            Math.round((Date.now() - startedAt) / 1000);
+          const watchTrack = (
+            label: string,
+            watched: MediaStreamTrack,
+          ): void => {
+            logger.info(
+              `screenshare ${label} track started: ${JSON.stringify(
+                watched.getSettings(),
+              )}`,
+            );
+            watched.addEventListener("ended", () => {
+              logger.warn(
+                `screenshare ${label} track ENDED by capturer after ${ageSec()}s ` +
+                  `(readyState=${watched.readyState}, muted=${watched.muted})`,
+              );
+            });
+            watched.addEventListener("mute", () => {
+              logger.warn(
+                `screenshare ${label} track muted (no data) at ${ageSec()}s`,
+              );
+            });
+            watched.addEventListener("unmute", () => {
+              logger.info(`screenshare ${label} track unmuted at ${ageSec()}s`);
+            });
+          };
+          watchTrack("video", track);
+          const audioTrack = participant$.value?.getTrackPublication(
+            Track.Source.ScreenShareAudio,
+          )?.track?.mediaStreamTrack;
+          if (audioTrack) watchTrack("audio", audioTrack);
+          else logger.info("screenshare has no audio track");
+
+          const participant = participant$.value;
+          const onUnpublished = (unpublished: unknown): void => {
+            if (unpublished !== publication) return;
+            logger.warn(
+              `screenshare unpublished after ${ageSec()}s ` +
+                `(track readyState=${track.readyState}, muted=${track.muted})`,
+            );
+            participant?.off(
+              ParticipantEvent.LocalTrackUnpublished,
+              onUnpublished,
+            );
+          };
+          participant?.on(
+            ParticipantEvent.LocalTrackUnpublished,
+            onUnpublished,
+          );
+        })
+        .catch((error: unknown) => {
+          logger.error(error);
+          const name = error instanceof DOMException ? error.name : undefined;
+          const userCancelled =
+            name === "NotAllowedError" || name === "AbortError";
+          if (
+            targetScreenshareState &&
+            !userCancelled &&
+            screenshareSettings.audio !== false &&
+            shareAudioTier < 2
+          ) {
+            shareAudioTier += 1;
+            logger.warn(
+              `screen share start failed (${name ?? "unknown"}); ` +
+                `dropping share audio to tier ${shareAudioTier} for the next attempt`,
+            );
+          }
+        });
     };
   }
 

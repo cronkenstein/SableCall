@@ -92,6 +92,7 @@ export const testAudioContext: Partial<AudioContext> & {
   createBufferSource: ReturnType<typeof vi.fn>;
   createGain: ReturnType<typeof vi.fn>;
   createStereoPanner: ReturnType<typeof vi.fn>;
+  createMediaStreamDestination: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
 } = {
   gain: gainNode,
@@ -107,6 +108,11 @@ export const testAudioContext: Partial<AudioContext> & {
   ),
   createGain: vi.fn().mockReturnValue(gainNode),
   createStereoPanner: vi.fn().mockReturnValue(panNode),
+  createMediaStreamDestination: vi.fn(() => ({
+    stream: { id: "mock-media-dest-stream" },
+    connect: (node: AudioNode) => node,
+    disconnect: (): void => {},
+  })),
   close: vi.fn().mockResolvedValue(undefined),
 };
 
