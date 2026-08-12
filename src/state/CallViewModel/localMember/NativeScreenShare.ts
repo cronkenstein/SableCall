@@ -27,6 +27,7 @@ import {
   screenShareResolution,
 } from "../../../settings/settings.ts";
 import { Config } from "../../../config/Config.ts";
+import { CUBIC_INTERPOLATE_SOURCE } from "./audioInterpolation.ts";
 
 /**
  * Native screen share bridge (macOS Tauri host).
@@ -204,6 +205,11 @@ const HARD_CLAMP_SEC = ${HARD_CLAMP_SEC};
 const DRIFT_GAIN = ${DRIFT_GAIN};
 const MAX_RATE_NUDGE = ${MAX_RATE_NUDGE};
 
+// Shared with the unit tests via audioInterpolation.ts — the worklet cannot
+// import, so the identical function is injected here. Bound to a local name
+// because minification may rename the function itself.
+const interpolate = ${CUBIC_INTERPOLATE_SOURCE};
+
 class NativeScreenShareSink extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -221,6 +227,14 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
     this.tailDecay = Math.exp(-1 / (${TAIL_TAU_SEC} * sampleRate));
     this.tail = [0, 0];
     this.lastOut = [0, 0];
+    // Final frame of the chunk most recently consumed. The cubic needs the
+    // sample *before* the read position; at the start of a chunk that sample
+    // lives in the one just dropped.
+    this.prevFrame = [0, 0];
+    // Scratch for locate(); see the note there on avoiding allocation.
+    this.locSamples = null;
+    this.locChannels = 0;
+    this.locIndex = 0;
     this.discontinuity = false;
     // Observability heartbeat (5s of output frames).
     this.statUnderruns = 0;
@@ -293,6 +307,31 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
         this.tail[ch] = t * this.tailDecay;
       }
     }
+  }
+
+  /**
+   * Resolve a frame offset measured from the start of chunks[0] to the chunk
+   * holding it. Writes to scratch fields rather than returning an object:
+   * this runs several times per output frame, and allocating there would
+   * hand the audio thread a GC pause.
+   *
+   * locSamples is null when the offset is past everything buffered.
+   */
+  locate(frameIdx) {
+    let idx = frameIdx;
+    for (let c = 0; c < this.chunks.length; c++) {
+      const chunk = this.chunks[c];
+      if (idx < chunk.frames) {
+        this.locSamples = chunk.samples;
+        this.locChannels = chunk.channels;
+        this.locIndex = idx;
+        return;
+      }
+      idx -= chunk.frames;
+    }
+    this.locSamples = null;
+    this.locChannels = 0;
+    this.locIndex = 0;
   }
 
   process(inputs, outputs) {
@@ -370,18 +409,30 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
       const channels = chunk.channels;
       const i0 = Math.floor(this.readPos);
       const t = this.readPos - i0;
-      // Interpolate across the chunk boundary: the stream is contiguous, so
-      // the next chunk's first frame is the correct right-hand sample.
-      const atEnd = i0 + 1 >= chunk.frames;
-      const next = atEnd ? this.chunks[1] : null;
+      // Cubic needs y[-1]..y[2]. The stream is contiguous across chunks, so
+      // resolve each neighbour to its own chunk rather than clamping at the
+      // boundary; locate() walks the queue, and y[-1] falls back to the frame
+      // carried over from the chunk that was just consumed.
+      this.locate(i0 + 1);
+      const s1 = this.locSamples;
+      const c1 = this.locChannels;
+      const n1 = this.locIndex;
+      this.locate(i0 + 2);
+      const s2 = this.locSamples;
+      const c2 = this.locChannels;
+      const n2 = this.locIndex;
       for (let ch = 0; ch < output.length; ch++) {
         const src = Math.min(ch, channels - 1);
-        const a = chunk.samples[i0 * channels + src];
-        const b = atEnd
-          ? (next ? next.samples[Math.min(src, next.channels - 1)] : a)
-          : chunk.samples[(i0 + 1) * channels + src];
+        const y0 = chunk.samples[i0 * channels + src];
+        const ym1 = i0 > 0
+          ? chunk.samples[(i0 - 1) * channels + src]
+          : (ch < this.prevFrame.length ? this.prevFrame[ch] : y0);
+        // Past the end of what has arrived, hold the last known sample: the
+        // alternative is inventing a slope into silence.
+        const y1 = s1 ? s1[n1 * c1 + Math.min(src, c1 - 1)] : y0;
+        const y2 = s2 ? s2[n2 * c2 + Math.min(src, c2 - 1)] : y1;
         const tailValue = ch < this.tail.length ? this.tail[ch] : 0;
-        const value = (a + (b - a) * t) * this.gain + tailValue;
+        const value = interpolate(ym1, y0, y1, y2, t) * this.gain + tailValue;
         output[ch][frame] = value;
         this.lastOut[ch] = value;
         this.tail[ch] = tailValue * this.tailDecay;
@@ -390,7 +441,14 @@ class NativeScreenShareSink extends AudioWorkletProcessor {
 
       this.readPos += (chunk.rate / sampleRate) * nudge;
       while (this.chunks.length > 0 && this.readPos >= this.chunks[0].frames) {
-        this.readPos -= this.chunks[0].frames;
+        const done = this.chunks[0];
+        // Keep its final frame: after the shift it becomes y[-1].
+        for (let ch = 0; ch < this.prevFrame.length; ch++) {
+          const src = Math.min(ch, done.channels - 1);
+          this.prevFrame[ch] =
+            done.samples[(done.frames - 1) * done.channels + src];
+        }
+        this.readPos -= done.frames;
         this.chunks.shift();
       }
     }
