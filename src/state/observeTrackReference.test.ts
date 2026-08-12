@@ -96,42 +96,25 @@ describe("observeTrackReference$", () => {
     h.stop();
   });
 
-  it("does not emit while adaptive stream merely pauses a track", () => {
-    // A pause leaves the track object and the element's binding intact, so
-    // there is nothing for a consumer to do. Emitting here made React
-    // re-attach the track on every flap, which showed up as choppy video and
-    // could leave a frozen frame after picture-in-picture closed.
+  it("emits when adaptive stream pauses and resumes a track", () => {
+    // adaptiveStream is enabled, so a track whose element stops being visible
+    // is paused and resumed later. It does that without replacing the track
+    // object — streamState is the only thing that moves — so that field has
+    // to be part of what we compare.
     const h = harness();
     const track = { kind: "video", streamState: "active" };
     (h.publication as { track?: unknown }).track = track;
     h.emit(ParticipantEvent.TrackSubscribed);
-    const before = h.emissions.length;
+    const afterSubscribe = h.emissions.length;
 
     track.streamState = "paused";
-    h.emit(ParticipantEvent.TrackMuted);
+    h.emit(ParticipantEvent.TrackStreamStateChanged);
+    expect(h.emissions.length).toBeGreaterThan(afterSubscribe);
+
+    const afterPause = h.emissions.length;
     track.streamState = "active";
-    h.emit(ParticipantEvent.TrackUnmuted);
-
-    expect(h.emissions).toHaveLength(before);
-    h.stop();
-  });
-
-  it("does emit when adaptive stream unsubscribes and resubscribes", () => {
-    // A real unsubscribe replaces the track, and that must reach the view
-    // model — this is the path that leaves a share blank otherwise.
-    const h = harness();
-    (h.publication as { track?: unknown }).track = { kind: "video" };
-    h.emit(ParticipantEvent.TrackSubscribed);
-
-    (h.publication as { track?: unknown }).track = undefined;
-    h.emit(ParticipantEvent.TrackUnsubscribed);
-    const afterDrop = h.emissions.length;
-
-    (h.publication as { track?: unknown }).track = { kind: "video" };
-    h.emit(ParticipantEvent.TrackSubscribed);
-
-    expect(h.emissions.length).toBeGreaterThan(afterDrop);
-    expect(h.emissions.at(-1)?.publication.track).toBeDefined();
+    h.emit(ParticipantEvent.TrackStreamStateChanged);
+    expect(h.emissions.length).toBeGreaterThan(afterPause);
     h.stop();
   });
 

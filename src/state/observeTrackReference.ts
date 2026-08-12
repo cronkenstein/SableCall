@@ -35,18 +35,14 @@ export function observeTrackReference$(
     // Publication precedes subscription, so without these the first emission
     // describes a publication with no track and no later one corrects it.
     //
-    // Deliberately NOT TrackStreamStateChanged. adaptiveStream flips
-    // streamState as elements come in and out of view, and the network
-    // adapts, but a pause leaves the track object and the element's binding
-    // intact — frames just stop and resume. Emitting there makes consumers
-    // re-attach the track for no reason, which shows up as choppy video and
-    // can strand a frozen frame. When adaptiveStream really does unsubscribe,
-    // TrackUnsubscribed fires and the track identity changes, which the
-    // comparison below already catches.
+    // TrackStreamStateChanged matters because adaptiveStream is on: it pauses
+    // a track whose element stops being visible and resumes it afterwards,
+    // which is how closing PiP could strand the video.
     observeParticipantEvents(
       participant,
       ParticipantEvent.TrackSubscribed,
       ParticipantEvent.TrackUnsubscribed,
+      ParticipantEvent.TrackStreamStateChanged,
     ),
   ).pipe(
     // Snapshot the track alongside the publication. LiveKit fills in
@@ -60,12 +56,16 @@ export function observeTrackReference$(
       return {
         publication,
         track: publication?.track,
+        // adaptiveStream pauses and resumes a track without replacing the
+        // track object, so its streamState is the only thing that moves.
+        streamState: publication?.track?.streamState,
       };
     }),
     distinctUntilChanged(
       (previous, current) =>
         previous.publication === current.publication &&
-        previous.track === current.track,
+        previous.track === current.track &&
+        previous.streamState === current.streamState,
     ),
     map(
       ({ publication }) => publication && { participant, publication, source },
