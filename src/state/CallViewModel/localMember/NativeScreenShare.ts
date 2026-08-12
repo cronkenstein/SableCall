@@ -1131,9 +1131,17 @@ export class NativeScreenShareManager {
         // which synthesized (destination-node) tracks may not report in
         // WKWebView; without this, stereo system audio downmixes to mono.
         forceStereo: stereo,
-        // Default is music (48kbps mono-oriented); media content deserves
-        // the stereo preset.
-        audioPreset: stereo ? AudioPresets.musicStereo : AudioPresets.music,
+        // Shared media is music and video soundtracks, not speech. The
+        // stereo preset is 64kbps for BOTH channels — around 32k each, which
+        // is where Opus starts smearing broadband treble: cymbals, applause,
+        // rain. The high-quality presets are 128k stereo / 96k mono.
+        //
+        // A ceiling, not a floor: Opus is VBR, so a quiet or simple stream
+        // still sends far less. Raising it costs nothing until the content
+        // actually needs the bits.
+        audioPreset: stereo
+          ? AudioPresets.musicHighQualityStereo
+          : AudioPresets.musicHighQuality,
       });
     }
     session.published = true;

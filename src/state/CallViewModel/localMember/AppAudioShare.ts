@@ -334,7 +334,8 @@ export class AppAudioShareManager {
     }
     this.logger.info("Published window-surface screen share video track");
 
-    let audioTrack: MediaStreamTrack | null = stream.getAudioTracks()[0] ?? null;
+    let audioTrack: MediaStreamTrack | null =
+      stream.getAudioTracks()[0] ?? null;
     if (audioTrack) {
       this.audioTrack = audioTrack;
       try {
@@ -345,7 +346,10 @@ export class AppAudioShareManager {
           // Mirrors the native bridge: without this, stereo system audio
           // can downmix to mono when channelCount is not reported.
           forceStereo: true,
-          audioPreset: AudioPresets.musicStereo,
+          // Same reasoning as the native bridge: 128k stereo rather than 64k,
+          // which is where Opus stops smearing broadband treble. VBR, so it
+          // is a ceiling rather than a cost on quiet content.
+          audioPreset: AudioPresets.musicHighQualityStereo,
         });
         if (publication.track instanceof LocalAudioTrack) {
           this.publishedAudioTrack = publication.track;
@@ -558,5 +562,4 @@ export class AppAudioShareManager {
       this.logger.warn(`Share audio sender stats at ${atMs}ms failed`, e);
     }
   }
-
 }

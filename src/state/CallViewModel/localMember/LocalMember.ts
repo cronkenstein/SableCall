@@ -819,7 +819,10 @@ export const createLocalMembership$ = ({
               dtx: false,
               red: false,
               forceStereo: true,
-              audioPreset: AudioPresets.musicStereo,
+              // Matches the native path: 128k stereo rather than 64k, which
+              // is where Opus stops smearing broadband treble. VBR, so it is
+              // a ceiling rather than a cost.
+              audioPreset: AudioPresets.musicHighQualityStereo,
             }
           : {};
 
