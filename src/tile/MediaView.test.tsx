@@ -5,7 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 Please see LICENSE in the repository root for full details.
 */
 
-import { describe, expect, it, test } from "vitest";
+import { afterEach, describe, expect, it, test, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { axe } from "vitest-axe";
 import { TooltipProvider } from "@vector-im/compound-web";
@@ -153,6 +153,76 @@ describe("MediaView", () => {
         screen.getByRole("img", { name: "@alice:example.com" }),
       ).toBeVisible();
       expect(screen.getByTestId("video")).not.toBeVisible();
+    });
+  });
+
+  describe("leaving picture-in-picture", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** jsdom's media stubs ignore prototype spies, so pin it on the element. */
+    function setPaused(video: HTMLElement, paused: boolean): void {
+      Object.defineProperty(video, "paused", {
+        get: () => paused,
+        configurable: true,
+      });
+    }
+
+    /** Fire the leave event as the browser does, targeted at the element. */
+    function leavePictureInPicture(video: HTMLElement): void {
+      video.dispatchEvent(
+        new Event("leavepictureinpicture", { bubbles: true }),
+      );
+    }
+
+    it("resumes a stream the close button paused", async () => {
+      // Safari stops playback when picture-in-picture is dismissed with its
+      // close button, which leaves a call tile frozen on the last frame while
+      // the participant's audio carries on. There is nothing to resume to —
+      // the stream is live — so playback has to be restarted.
+      render(<MediaView {...baseProps} />);
+      const video = screen.getByTestId("video");
+      const play = vi
+        .spyOn(video as HTMLVideoElement, "play")
+        .mockResolvedValue(undefined);
+      setPaused(video, true);
+
+      leavePictureInPicture(video);
+      await vi.waitFor(() => expect(play).toHaveBeenCalled());
+    });
+
+    it("leaves a still-playing stream alone", async () => {
+      // Returning to the tab keeps playing; calling play() again would be
+      // pointless churn on the element.
+      render(<MediaView {...baseProps} />);
+      const video = screen.getByTestId("video");
+      const play = vi
+        .spyOn(video as HTMLVideoElement, "play")
+        .mockResolvedValue(undefined);
+      setPaused(video, false);
+
+      leavePictureInPicture(video);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      expect(play).not.toHaveBeenCalled();
+    });
+
+    it("ignores an event from another tile's video", () => {
+      // Several tiles mount this same document-level listener, so each has to
+      // act only on its own element or one tile's PiP would restart another.
+      render(<MediaView {...baseProps} />);
+      const video = screen.getByTestId("video");
+      setPaused(video, true);
+      const play = vi
+        .spyOn(video as HTMLVideoElement, "play")
+        .mockResolvedValue(undefined);
+
+      const otherVideo = document.createElement("video");
+      document.body.appendChild(otherVideo);
+      leavePictureInPicture(otherVideo);
+
+      expect(play).not.toHaveBeenCalled();
+      otherVideo.remove();
     });
   });
 });

@@ -124,11 +124,34 @@ export const MediaView: FC<Props> = ({
       const videoEl = mediaRef.current?.querySelector("video") ?? null;
       setInPictureInPicture(document.pictureInPictureElement === videoEl);
     };
+
+    // Dismissing picture-in-picture with its close button stops playback,
+    // where "return to tab" resumes it inline — reasonable for a recording,
+    // wrong for a call. The tile is left showing a frozen frame with a play
+    // button while the participant's audio carries on, and there is nothing
+    // to resume *to*: the stream is live.
+    //
+    // Checked on the next frame because the pause is not ordered against the
+    // leave event; reading `paused` synchronously can miss it.
+    const onPipLeave = (event: Event): void => {
+      onPipChange();
+      const videoEl = mediaRef.current?.querySelector("video");
+      if (!videoEl || event.target !== videoEl) return;
+      requestAnimationFrame((): void => {
+        if (!videoEl.isConnected || !videoEl.paused) return;
+        // play() does not always return a promise — older implementations
+        // and jsdom return undefined — so do not assume one to catch on.
+        void Promise.resolve(videoEl.play()).catch(() => {
+          // Left paused; the play button in the tile remains the way out.
+        });
+      });
+    };
+
     document.addEventListener("enterpictureinpicture", onPipChange);
-    document.addEventListener("leavepictureinpicture", onPipChange);
+    document.addEventListener("leavepictureinpicture", onPipLeave);
     return () => {
       document.removeEventListener("enterpictureinpicture", onPipChange);
-      document.removeEventListener("leavepictureinpicture", onPipChange);
+      document.removeEventListener("leavepictureinpicture", onPipLeave);
     };
   }, []);
 
