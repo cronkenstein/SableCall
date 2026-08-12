@@ -90,6 +90,21 @@ const TROUGH_EXCESS_SEC = 0.03;
 /** Absolute safety: a single huge backlog burst is cut down immediately. */
 const HARD_CLAMP_SEC = 0.24;
 const DRIFT_GAIN = 0.4;
+/**
+ * Playback-rate steering authority, +/-2%.
+ *
+ * Far beyond real clock drift (tens of ppm) because it also removes
+ * accumulated buffer error, not just drift. Reducing it does NOT reduce the
+ * resampling artifact, which is a common assumption and a wrong one: this
+ * controls how fast the interpolator's fractional phase sweeps, while the
+ * gain variation across that sweep belongs entirely to the kernel. Slowing
+ * the sweep lowers the modulation rate without shrinking it, turning a fast
+ * shimmer into a slow wow.
+ *
+ * Swept 0.02 down to 0.001 (SIM_CONST_MAX_RATE_NUDGE): 12 kHz ripple stayed
+ * flat at ~0.35 dB until 0.001, where it rose to 0.79 dB. Below 0.005 the
+ * buffer can no longer track a +/-0.5% clock error and the sim fails outright.
+ */
 const MAX_RATE_NUDGE = 0.02;
 /** Fade-in time after a discontinuity, and decay constant for the old tail. */
 const FADE_SEC = 0.005;

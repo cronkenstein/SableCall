@@ -51,6 +51,18 @@ constants.CUBIC_INTERPOLATE_SOURCE = `function ${fnMatch[1]}(${fnMatch[2]}\n}`
 // SIM_INTERPOLATOR=linear reinstates the old two-point kernel, so the cost of
 // changing it can be measured rather than argued about. Compare the ripple
 // figures on the high-frequency scenarios between the two.
+// Override any extracted constant to explore a change before committing to it:
+//   SIM_CONST_MAX_RATE_NUDGE=0.005 node scripts/native-screenshare/worklet-sim.mjs
+// The header rule is to run this before tuning anything here; this makes the
+// sweep itself cheap.
+for (const [key, value] of Object.entries(process.env)) {
+  if (!key.startsWith("SIM_CONST_")) continue;
+  const name = key.slice("SIM_CONST_".length);
+  if (!(name in constants)) throw new Error(`unknown constant ${name}`);
+  constants[name] = value;
+  console.log(`[sim] ${name} = ${value} (override)`);
+}
+
 if (process.env.SIM_INTERPOLATOR === "linear") {
   constants.CUBIC_INTERPOLATE_SOURCE =
     "function linearInterpolate(ym1, y0, y1, y2, t) { return y0 + (y1 - y0) * t; }";
