@@ -94,17 +94,15 @@ export function ReactionPopupMenu({
       )}
       <div className={styles.reactionPopupMenu}>
         <section className={styles.handRaiseSection}>
-          <Tooltip label={label} caption="H">
-            <CpdButton
-              kind={isHandRaised ? "primary" : "secondary"}
-              aria-keyshortcuts="H"
-              aria-pressed={isHandRaised}
-              aria-label={label}
-              onClick={() => toggleRaisedHand()}
-              iconOnly
-              Icon={RaisedHandSolidIcon}
-            />
-          </Tooltip>
+          <CpdButton
+            kind={isHandRaised ? "primary" : "secondary"}
+            aria-keyshortcuts="H"
+            aria-pressed={isHandRaised}
+            aria-label={label}
+            onClick={() => toggleRaisedHand()}
+            iconOnly
+            Icon={RaisedHandSolidIcon}
+          />
         </section>
         <div className={styles.verticalSeperator} />
         <section className={styles.reactionsMenuSection}>
@@ -116,48 +114,37 @@ export function ReactionPopupMenu({
           >
             {filteredReactionSet.map((reaction, index) => (
               <li key={reaction.name}>
-                <Tooltip
-                  label={reaction.name}
-                  caption={
+                <CpdButton
+                  kind="secondary"
+                  className={styles.reactionButton}
+                  disabled={!canReact}
+                  onClick={() => sendReaction(reaction)}
+                  // Was the tooltip's job. Without it these buttons announce
+                  // as just their emoji, which screen readers render
+                  // inconsistently.
+                  aria-label={reaction.name}
+                  aria-keyshortcuts={
                     index < ReactionsRowSize
                       ? (index + 1).toString()
                       : undefined
                   }
                 >
-                  <CpdButton
-                    kind="secondary"
-                    className={styles.reactionButton}
-                    disabled={!canReact}
-                    onClick={() => sendReaction(reaction)}
-                    aria-keyshortcuts={
-                      index < ReactionsRowSize
-                        ? (index + 1).toString()
-                        : undefined
-                    }
-                  >
-                    {reaction.emoji}
-                  </CpdButton>
-                </Tooltip>
+                  {reaction.emoji}
+                </CpdButton>
               </li>
             ))}
           </menu>
         </section>
         <section style={{ marginLeft: "var(--cpd-separator-spacing)" }}>
-          <Tooltip
-            label={
+          <CpdButton
+            iconOnly
+            aria-label={
               isFullyExpanded ? t("action.show_less") : t("action.show_more")
             }
-          >
-            <CpdButton
-              iconOnly
-              aria-label={
-                isFullyExpanded ? t("action.show_less") : t("action.show_more")
-              }
-              Icon={isFullyExpanded ? ChevronUpIcon : ChevronDownIcon}
-              kind="tertiary"
-              onClick={() => setExpanded(!isFullyExpanded)}
-            />
-          </Tooltip>
+            Icon={isFullyExpanded ? ChevronUpIcon : ChevronDownIcon}
+            kind="tertiary"
+            onClick={() => setExpanded(!isFullyExpanded)}
+          />
         </section>
       </div>
     </>
