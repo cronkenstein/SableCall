@@ -34,6 +34,7 @@ import {
   trackProcessorSync,
 } from "../../../livekit/TrackProcessorContext.tsx";
 import { getUrlParams } from "../../../UrlParams.ts";
+import { releaseMicrophoneOnMute$ } from "../../../controls.ts";
 import { observeTrackReference$ } from "../../observeTrackReference";
 import { type Connection } from "../remoteMembers/Connection.ts";
 import { ObservableScope } from "../../ObservableScope.ts";
@@ -97,11 +98,47 @@ export class Publisher {
     this.observeMediaDevices(this.scope, devices, controlledAudioDevices);
 
     this.workaroundRestartAudioInputTrackChrome(devices, this.scope);
+    this.observeReleaseMicrophoneOnMute(this.scope, room);
 
     this.connection.livekitRoom.localParticipant.on(
       ParticipantEvent.LocalTrackPublished,
       this.onLocalTrackPublished.bind(this),
     );
+  }
+
+  /**
+   * Apply the host's release-on-mute preference to the published microphone
+   * track.
+   *
+   * LiveKit only reads `stopMicTrackOnMute` from the publish defaults once, at
+   * publish time, and stores it on the track as `stopOnMute`. Writing the
+   * track property directly is what lets the preference change mid-call —
+   * which it must, because push-to-talk can be switched on while a call is
+   * already running.
+   */
+  private applyReleaseMicrophoneOnMute(
+    lkRoom: LivekitRoom,
+    release: boolean,
+  ): void {
+    const track = lkRoom.localParticipant.getTrackPublication(
+      Track.Source.Microphone,
+    )?.track;
+    if (!track || track.kind !== Track.Kind.Audio) return;
+    const audioTrack = track as LocalAudioTrack;
+    if (audioTrack.stopOnMute === release) return;
+    this.logger.debug(`Setting microphone stopOnMute: ${release}`);
+    audioTrack.stopOnMute = release;
+  }
+
+  private observeReleaseMicrophoneOnMute(
+    scope: ObservableScope,
+    lkRoom: LivekitRoom,
+  ): void {
+    releaseMicrophoneOnMute$
+      .pipe(distinctUntilChanged(), scope.bind())
+      .subscribe((release) => {
+        this.applyReleaseMicrophoneOnMute(lkRoom, release);
+      });
   }
 
   public async destroy(): Promise<void> {
@@ -138,6 +175,9 @@ export class Publisher {
     }
     // also check the mute state and apply it
     if (localTrackPublication.source === Track.Source.Microphone) {
+      // The track is new, so it carries the publish-time default rather than
+      // the host's current preference. Re-apply before any mute can happen.
+      this.applyReleaseMicrophoneOnMute(lkRoom, releaseMicrophoneOnMute$.value);
       const muteState = this.muteStates.audio;
       // skip this if a sync is in progress: enabled$ still reflects the old
       // state while the handler is mid-flight, so the handler itself will apply

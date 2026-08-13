@@ -105,7 +105,12 @@ function buildPublishOptions(
     ...(screenShareSimulcastLayers && {
       screenShareSimulcastLayers: screenShareSimulcastLayers as VideoPreset[],
     }),
-    stopMicTrackOnMute: false,
+    // Release the capture device on mute so the OS stops reporting the
+    // microphone as in use. LiveKit reads this once, at publish time, and
+    // stores it on the track; Publisher rewrites the track property when the
+    // host toggles push-to-talk, where re-acquiring on every keypress would
+    // clip the first word and make Bluetooth headsets change profiles.
+    stopMicTrackOnMute: true,
     videoCodec: codec,
     videoEncoding,
     backupCodec: {

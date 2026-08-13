@@ -5,7 +5,7 @@ SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Element-Commercial
 Please see LICENSE in the repository root for full details.
 */
 
-import { Subject } from "rxjs";
+import { BehaviorSubject, Subject } from "rxjs";
 import { logger } from "matrix-js-sdk/lib/logger";
 
 export interface Controls {
@@ -24,6 +24,16 @@ export interface Controls {
    * for push-to-talk / push-to-mute.
    */
   setMicrophoneEnabled(enabled: boolean): void;
+  /**
+   * Whether muting the microphone should release the capture device, so the OS
+   * stops showing the microphone as in use. Defaults to true.
+   *
+   * Hosting clients should set this to false while a push-to-talk /
+   * push-to-mute key governs the microphone: unmute has to re-acquire the
+   * device, which costs the start of the first word and makes Bluetooth
+   * headsets switch profiles on every keypress.
+   */
+  setReleaseMicrophoneOnMute(release: boolean): void;
   showNativeAudioDevicePicker?: () => void;
   onBackButtonPressed?: () => void;
 
@@ -108,6 +118,17 @@ export const setAudioEnabled$ = new Subject<boolean>();
  */
 export const setMicrophoneEnabled$ = new Subject<boolean>();
 
+/**
+ * Whether muting should stop the microphone's capture track rather than only
+ * disabling it, which is what turns the OS microphone indicator off.
+ *
+ * A BehaviorSubject because the host sets this before a call exists: the
+ * Publisher for a later call still needs the current value when it subscribes.
+ * Defaults to releasing — a mute the user has to click is deliberate and
+ * long-lived, so holding the device open is never what they meant.
+ */
+export const releaseMicrophoneOnMute$ = new BehaviorSubject<boolean>(true);
+
 let playbackStartedEmitted = false;
 export const setPlaybackStarted = (): void => {
   if (!playbackStartedEmitted) {
@@ -176,10 +197,18 @@ window.controls = {
       enabled,
     );
     if (!setMicrophoneEnabled$.observed)
-      logger.warn(
-        "setMicrophoneEnabled called with no active call; ignoring",
-      );
+      logger.warn("setMicrophoneEnabled called with no active call; ignoring");
     setMicrophoneEnabled$.next(enabled);
+  },
+  setReleaseMicrophoneOnMute(release: boolean): void {
+    logger.info(
+      "[MediaDevices controls] setReleaseMicrophoneOnMute called from host:",
+      release,
+    );
+    // No observer check: this is a preference, not a command. The host sets it
+    // when its push-to-talk setting changes, which may be long before or after
+    // any call exists, and the BehaviorSubject replays it to the next call.
+    releaseMicrophoneOnMute$.next(release);
   },
 
   // wrappers for the deprecated controls fields
