@@ -43,7 +43,12 @@ div.reactionPopupMenuRoot {
 div.reactionPopupMenuRoot.reactionPopupMenuModal {
   top: calc(100vh - var(--call-reactions-popup-bottom-inset));
   left: 50%;
-  width: fit-content;
+  /* inline-size, not width: Modal's .dialog sets `inline-size: 580px`, and a
+   * logical/physical pair across two rules is exactly where engines disagree
+   * about which wins. Matching the property makes it a plain specificity
+   * contest, which this selector wins. With `width` here the box stayed at
+   * 580px, so the glass ran well past its contents. */
+  inline-size: fit-content;
   transform: translate(-50%, -100%);
 }
 
