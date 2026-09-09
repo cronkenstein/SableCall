@@ -149,7 +149,8 @@ test("control a participant's screen share volume", () => {
       },
     });
     expectObservable(vm.playbackVolume$).toBe("ab(cd)(ef)g", {
-      a: 1,
+      // Screen shares start at half volume, not full
+      a: 0.5,
       b: 0,
       c: 0.6,
       d: 0.8,

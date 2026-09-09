@@ -45,6 +45,11 @@ export function createRemoteScreenShare(
     ...createBaseScreenShare(scope, inputs),
     ...createVolumeControls(scope, {
       pretendToBeDisconnected$,
+      // Half volume to begin with. Whoever is sharing cannot hear what their
+      // share sounds like to everyone else, so at full volume the listener
+      // finds out the hard way; turning it up is a choice, being deafened is
+      // not.
+      initialVolume: 0.5,
       sink$: scope.behavior(
         inputs.participant$.pipe(
           map(
