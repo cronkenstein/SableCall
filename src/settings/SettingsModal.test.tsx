@@ -14,6 +14,7 @@ import type { MatrixClient } from "matrix-js-sdk";
 import type { ReactNode } from "react";
 import { SettingsModal } from "./SettingsModal";
 import {
+  advancedCamera,
   rnnoiseNoiseSuppression,
   rnnoiseNoiseSuppressionPreset,
 } from "./settings";
@@ -105,13 +106,13 @@ vi.mock("../UrlParams", async () => {
   };
 });
 
-function renderSettingsModal(): void {
+function renderSettingsModal(tab: "audio" | "video" = "audio"): void {
   render(
     <TooltipProvider>
       <SettingsModal
         open
         onDismiss={vi.fn()}
-        tab="audio"
+        tab={tab}
         onTabChange={vi.fn()}
         client={{} as MatrixClient}
       />
@@ -185,5 +186,51 @@ describe("SettingsModal RNNoise controls", () => {
     expect(
       localStorage.getItem("matrix-setting-rnnoise-noise-suppression"),
     ).toBe("true");
+  });
+});
+
+describe("SettingsModal media quality notice", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class ResizeObserver {
+        public observe(): void {}
+        public unobserve(): void {}
+        public disconnect(): void {}
+      },
+    );
+    localStorage.clear();
+    advancedCamera.setValue(false);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("only warns about rejoining once the quality controls are on screen", async () => {
+    // Every one of these is read when the call connects and the track is first
+    // published, so none of them touch a call in progress. The warning belongs
+    // with the controls, not with the toggle that reveals them — by the time
+    // someone is changing a value, anything above it has scrolled away.
+    renderSettingsModal("video");
+
+    expect(screen.queryByText("Takes effect on your next call")).toBeNull();
+
+    await userEvent.click(
+      screen.getByLabelText("Advanced camera settings"),
+    );
+
+    expect(screen.getByText("Takes effect on your next call")).toBeInTheDocument();
+  });
+
+  it("warns on audio processing but not on the settings that apply live", () => {
+    // Audio processing lands in audioCaptureDefaults when the room connects, so
+    // it needs the warning. RNNoise shares the tab with it and does not:
+    // Publisher subscribes to that setting's value$ and swaps the processor on
+    // a live track. Exactly one notice on this tab is the whole assertion.
+    renderSettingsModal("audio");
+
+    expect(screen.getByText("Audio processing")).toBeInTheDocument();
+    expect(screen.getAllByText("Takes effect on your next call")).toHaveLength(1);
   });
 });

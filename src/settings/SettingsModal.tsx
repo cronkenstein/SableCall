@@ -16,6 +16,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { type MatrixClient } from "matrix-js-sdk";
 import {
+  Alert,
   Button,
   InlineField,
   Label,
@@ -133,6 +134,34 @@ const BlurCheckbox: FC = (): ReactNode => {
   );
 };
 
+/**
+ * For settings that are read once, when the call connects and the track is
+ * first published, and so do nothing to a call already in progress.
+ *
+ * Sits with the controls rather than in the section's description. Where the
+ * controls are behind an "Advanced" toggle they render below that description,
+ * so by the time anyone is changing a value it has scrolled off the top.
+ *
+ * Deliberately not on every section: background blur goes through
+ * `setProcessor` and RNNoise subscribes to its setting's `value$`, so both of
+ * those do apply to a live call and must not claim otherwise.
+ */
+const RejoinNotice: FC = (): ReactNode => {
+  const { t } = useTranslation();
+
+  return (
+    <Alert
+      type="info"
+      title={t("settings.rejoin_notice_title", "Takes effect on your next call")}
+    >
+      {t(
+        "settings.rejoin_notice_description",
+        "These settings are applied when you join a call. Changing them now will not alter a call you are already in — leave and rejoin for them to take effect.",
+      )}
+    </Alert>
+  );
+};
+
 const MediaQualitySettings: FC<{
   id: string;
   header: string;
@@ -182,6 +211,7 @@ const MediaQualitySettings: FC<{
       </FieldRow>
       {advancedEnabled && (
         <>
+          <RejoinNotice />
           <div className={styles.volumeSlider}>
             <label htmlFor={`${id}Resolution`}>
               {t("settings.resolution_label", "Resolution")}
@@ -338,12 +368,7 @@ const AudioProcessingSettings: FC = (): ReactNode => {
   return (
     <>
       <h4>{t("settings.audio_processing_header", "Audio processing")}</h4>
-      <p>
-        {t(
-          "settings.audio_processing_description",
-          "Changes apply on next call join.",
-        )}
-      </p>
+      <RejoinNotice />
       <FieldRow>
         <InputField
           id="echoCancellation"
@@ -526,7 +551,7 @@ export const SettingsModal: FC<Props> = ({
           )}
           description={t(
             "settings.advanced_camera_description",
-            "Configure resolution, framerate, bitrate, and codec for camera video. Changes apply on next call join.",
+            "Configure resolution, framerate, bitrate, and codec for camera video.",
           )}
           toggleSetting={advancedCameraSetting}
           resolutionSetting={cameraResolutionSetting}
