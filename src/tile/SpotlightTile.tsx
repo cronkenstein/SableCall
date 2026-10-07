@@ -7,10 +7,12 @@ Please see LICENSE in the repository root for full details.
 
 import {
   type ComponentProps,
+  createContext,
   type FC,
   type Ref,
   type RefAttributes,
   useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
@@ -36,7 +38,10 @@ import classNames from "classnames";
 import { type TrackReferenceOrPlaceholder } from "@livekit/components-core";
 import { Menu, MenuItem } from "@vector-im/compound-web";
 
-import { PopOutIcon } from "@vector-im/compound-design-tokens/assets/web/icons";
+import {
+  EditIcon,
+  PopOutIcon,
+} from "@vector-im/compound-design-tokens/assets/web/icons";
 import FullScreenMaximiseIcon from "../icons/FullScreenMaximise.svg?react";
 import FullScreenMinimiseIcon from "../icons/FullScreenMinimise.svg?react";
 import { MediaView } from "./MediaView";
@@ -63,6 +68,15 @@ import { type RemoteScreenShareViewModel } from "../state/media/RemoteScreenShar
 import { type MediaViewModel } from "../state/media/MediaViewModel";
 import { Slider } from "../Slider";
 import { platform } from "../Platform";
+import { getUrlParams } from "../UrlParams";
+import {
+  openScreenSharePopout,
+  type ScreenSharePopout,
+} from "../screenSharePopout";
+import {
+  AnnotationLayer,
+  useAnnotationBus,
+} from "../annotations/AnnotationLayer";
 import { type RingingMediaViewModel } from "../state/media/RingingMediaViewModel";
 
 /**
@@ -76,6 +90,9 @@ import { type RingingMediaViewModel } from "../state/media/RingingMediaViewModel
  * merely measures time since the initiating click.
  */
 const SCROLL_INTENT_MS = 300;
+
+/** Which of the spotlight's media, if any, is being drawn on. */
+const DrawingMediaContext = createContext<string | null>(null);
 
 interface SpotlightItemBaseProps {
   ref?: Ref<HTMLDivElement>;
@@ -182,11 +199,22 @@ const SpotlightScreenShareItem: FC<SpotlightScreenShareItemProps> = ({
   vm,
   ...props
 }) => {
+  const drawingMediaId = useContext(DrawingMediaContext);
+  const shareKey = props.video?.participant.identity;
   return (
     <MediaView
       videoFit="contain"
       mirror={false}
       showPipButton={false}
+      overlay={
+        shareKey ? (
+          <AnnotationLayer
+            shareKey={shareKey}
+            drawing={drawingMediaId === vm.id}
+            fit="contain"
+          />
+        ) : undefined
+      }
       {...props}
     />
   );
@@ -450,8 +478,13 @@ export const SpotlightTile: FC<Props> = ({
   const canGoToNext = visibleIndex !== -1 && visibleIndex < media.length - 1;
 
   const [allowPip] = useSetting(allowPipSetting);
+  const { popoutWindow } = getUrlParams();
   const [hostFullscreen, setHostFullscreen] = useState(false);
   const [inPictureInPicture, setInPictureInPicture] = useState(false);
+  const [popout, setPopout] = useState<{
+    mediaId: string;
+    handle: ScreenSharePopout;
+  } | null>(null);
 
   const isFullscreen = useCallback((): boolean => {
     return isDocumentFullscreen() || hostFullscreen;
@@ -473,11 +506,96 @@ export const SpotlightTile: FC<Props> = ({
     });
   }, [ourRef]);
 
+  // A screen share pops out on its own, without the call: into a window of its
+  // own where the host makes one (Windows has no picture in picture), otherwise
+  // into the browser's picture in picture.
+  const visibleIsScreenShare = visibleMedia?.type === "screen share";
+  const poppedOut =
+    visibleMedia != null &&
+    (popout?.mediaId === visibleMedia.id ||
+      (!popoutWindow && visibleIsScreenShare && inPictureInPicture));
+  const onTogglePopout = useCallback(() => {
+    if (visibleMedia?.type !== "screen share") return;
+    if (popout?.mediaId === visibleMedia.id) {
+      popout.handle.close();
+      return;
+    }
+    const video = ourRef.current?.querySelector<HTMLVideoElement>(
+      `[data-id="${CSS.escape(visibleMedia.id)}"] video`,
+    );
+    if (!video) return;
+    if (!popoutWindow) {
+      void enterPictureInPicture(video).catch(() => {
+        // WKWebView may reject PiP until the video has rendered frames.
+      });
+      return;
+    }
+    const track = visibleMedia.video$.value?.publication?.track;
+    if (!track) return;
+    const mediaId = visibleMedia.id;
+    const handle = openScreenSharePopout(
+      track,
+      video,
+      t("video_tile.screen_share_popout_title", {
+        defaultValue: "{{name}}'s screen",
+        name: visibleMedia.displayName$.value,
+      }),
+      () =>
+        setPopout((current) => (current?.mediaId === mediaId ? null : current)),
+    );
+    if (handle) setPopout({ mediaId, handle });
+  }, [visibleMedia, popout, popoutWindow, ourRef, t]);
+
+  // Follow the popped-out share's track if it is restarted under the same
+  // media, and close the pop-out when the share is gone.
+  const poppedMedia = popout
+    ? media.find((vm) => vm.id === popout.mediaId)
+    : undefined;
+  useEffect(() => {
+    if (!popout) return;
+    if (poppedMedia?.type !== "screen share") {
+      popout.handle.close();
+      return;
+    }
+    const subscription = poppedMedia.video$.subscribe((trackRef) => {
+      const track = trackRef?.publication?.track;
+      if (track) popout.handle.setTrack(track);
+    });
+    return (): void => subscription.unsubscribe();
+  }, [popout, poppedMedia]);
+
+  const showPopoutButton = platform === "desktop" && visibleIsScreenShare;
+
+  // Drawing on a screen share: everyone in the call can, and everyone sees it.
+  const annotationBus = useAnnotationBus();
+  const [drawingMediaId, setDrawingMediaId] = useState<string | null>(null);
+  const drawing = visibleMedia != null && drawingMediaId === visibleMedia.id;
+  const showDrawButton = annotationBus != null && visibleIsScreenShare;
+  const onToggleDrawing = useCallback(() => {
+    if (!visibleMedia) return;
+    const id = visibleMedia.id;
+    setDrawingMediaId((current) => (current === id ? null : id));
+  }, [visibleMedia]);
+  useEffect(() => {
+    if (drawingMediaId && !media.some((vm) => vm.id === drawingMediaId)) {
+      setDrawingMediaId(null);
+    }
+  }, [media, drawingMediaId]);
+  useEffect(() => {
+    if (!drawingMediaId) return;
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") setDrawingMediaId(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return (): void => window.removeEventListener("keydown", onKeyDown);
+  }, [drawingMediaId]);
   const showPipButton =
     platform === "desktop" &&
+    !popoutWindow &&
     allowPip &&
     visibleMedia != null &&
-    visibleMedia.type !== "ringing";
+    visibleMedia.type !== "ringing" &&
+    !visibleIsScreenShare;
 
   useEffect(() => {
     const onFullscreenChange = (): void => {
@@ -617,31 +735,73 @@ export const SpotlightTile: FC<Props> = ({
           <ChevronLeftIcon aria-hidden width={24} height={24} />
         </button>
       )}
-      <div
-        className={styles.contents}
-        onWheelCapture={markScrollIntent}
-        onPointerDownCapture={markScrollIntent}
-        onTouchStartCapture={markScrollIntent}
-        onKeyDownCapture={markScrollIntent}
-      >
-        {media.map((vm) => (
-          <SpotlightItem
-            key={vm.id}
-            vm={vm}
-            targetWidth={targetWidth}
-            targetHeight={targetHeight}
-            showNameTags={showNameTags}
-            focusable={focusable}
-            intersectionObserver$={intersectionObserver$}
-            // This is how we get the container to scroll to the right media
-            // when the previous/next buttons are clicked: we temporarily
-            // remove all scroll snap points except for just the one media
-            // that we want to bring into view
-            snap={scrollToId === null || scrollToId === vm.id}
-            aria-hidden={(scrollToId ?? visibleId) !== vm.id}
-          />
-        ))}
-      </div>
+      <DrawingMediaContext.Provider value={drawingMediaId}>
+        <div
+          className={styles.contents}
+          onWheelCapture={markScrollIntent}
+          onPointerDownCapture={markScrollIntent}
+          onTouchStartCapture={markScrollIntent}
+          onKeyDownCapture={markScrollIntent}
+        >
+          {media.map((vm) => (
+            <SpotlightItem
+              key={vm.id}
+              vm={vm}
+              targetWidth={targetWidth}
+              targetHeight={targetHeight}
+              showNameTags={showNameTags}
+              focusable={focusable}
+              intersectionObserver$={intersectionObserver$}
+              // This is how we get the container to scroll to the right media
+              // when the previous/next buttons are clicked: we temporarily
+              // remove all scroll snap points except for just the one media
+              // that we want to bring into view
+              snap={scrollToId === null || scrollToId === vm.id}
+              aria-hidden={(scrollToId ?? visibleId) !== vm.id}
+            />
+          ))}
+        </div>
+      </DrawingMediaContext.Provider>
+
+      {(showPopoutButton || showDrawButton) && (
+        <div className={styles.topRightButtons}>
+          {showDrawButton && (
+            <button
+              type="button"
+              className={classNames(styles.expand)}
+              aria-label={
+                drawing
+                  ? t("video_tile.annotate_stop", "Stop drawing")
+                  : t("video_tile.annotate", "Draw on the screen")
+              }
+              aria-pressed={drawing}
+              data-enabled={drawing || undefined}
+              onClick={onToggleDrawing}
+              tabIndex={focusable ? undefined : -1}
+              data-testid="spotlight_draw"
+            >
+              <EditIcon aria-hidden width={20} height={20} />
+            </button>
+          )}
+          {showPopoutButton && (
+            <button
+              type="button"
+              className={classNames(styles.expand)}
+              aria-label={
+                poppedOut
+                  ? t("video_tile.screen_share_popin", "Put the screen back")
+                  : t("video_tile.screen_share_popout", "Pop out the screen")
+              }
+              aria-pressed={poppedOut}
+              onClick={onTogglePopout}
+              tabIndex={focusable ? undefined : -1}
+              data-testid="spotlight_popout"
+            >
+              <PopOutIcon aria-hidden width={20} height={20} />
+            </button>
+          )}
+        </div>
+      )}
 
       {showPipButton && (
         <div className={styles.topRightButtons}>

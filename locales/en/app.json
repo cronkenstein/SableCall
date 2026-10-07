@@ -281,6 +281,8 @@
   "version": "{{productName}} version: {{version}}",
   "video_tile": {
     "always_show": "Always show",
+    "annotate": "Draw on the screen",
+    "annotate_stop": "Stop drawing",
     "call_ended": "Call ended",
     "calling": "Calling…",
     "camera_starting": "Video loading...",
@@ -290,6 +292,9 @@
     "expand": "Expand",
     "mute_for_me": "Mute for me",
     "muted_for_me": "Muted for me",
+    "screen_share_popin": "Put the screen back",
+    "screen_share_popout": "Pop out the screen",
+    "screen_share_popout_title": "{{name}}'s screen",
     "screen_share_volume": "Screen share volume",
     "volume": "Volume",
     "waiting_for_media": "Waiting for media..."

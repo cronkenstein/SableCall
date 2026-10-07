@@ -258,6 +258,14 @@ export interface UrlConfiguration {
    */
   screenShareAppAudio?: boolean;
 
+  /**
+   * Whether the hosting client turns a `window.open` of
+   * `about:blank#sable-popout` into a small always-on-top window (Windows
+   * Tauri, where WebView2 has no picture in picture). A screen share is then
+   * popped out into such a window instead of the browser's picture in picture.
+   */
+  popoutWindow?: boolean;
+
   callIntent?: RTCCallIntent;
 }
 
@@ -505,6 +513,7 @@ export const computeUrlParams = (search = "", hash = ""): UrlParams => {
     echoCancellation: parser.getFlagParam("echoCancellation", true),
     nativeScreenShare: parser.getFlag("nativeScreenShare"),
     screenShareAppAudio: parser.getFlag("screenShareAppAudio"),
+    popoutWindow: parser.getFlag("popoutWindow"),
   };
 
   // Log the final configuration for debugging purposes.

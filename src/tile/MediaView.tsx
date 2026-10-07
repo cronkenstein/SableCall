@@ -39,6 +39,7 @@ import {
 import { type ReactionOption } from "../reactions";
 import { ReactionIndicator } from "../reactions/ReactionIndicator";
 import { RTCConnectionStats } from "../RTCConnectionStats";
+import { getUrlParams } from "../UrlParams";
 import { enterPictureInPicture } from "../hostMedia";
 import { platform } from "../Platform";
 
@@ -71,6 +72,8 @@ interface Props extends ComponentProps<typeof animated.div> {
   focusUrl?: string;
   /** When false, the host (e.g. SpotlightTile) owns the PiP control. */
   showPipButton?: boolean;
+  /** Drawn over everything else in the tile, e.g. annotations on a screen share. */
+  overlay?: ReactNode;
 }
 
 export const MediaView: FC<Props> = ({
@@ -101,6 +104,7 @@ export const MediaView: FC<Props> = ({
   rtcBackendIdentity,
   focusUrl,
   showPipButton: showPipButtonProp = true,
+  overlay,
   ...props
 }) => {
   const { t } = useTranslation();
@@ -111,9 +115,12 @@ export const MediaView: FC<Props> = ({
   const [inPictureInPicture, setInPictureInPicture] = useState(false);
 
   const avatarSize = Math.round(Math.min(targetWidth, targetHeight) / 2);
+  // Where the host pops windows out instead (Windows), the browser has no picture
+  // in picture to offer, and only a screen share pops out.
   const showPipButton =
     showPipButtonProp &&
     platform === "desktop" &&
+    !getUrlParams().popoutWindow &&
     allowPip &&
     videoEnabled &&
     video?.publication !== undefined &&
@@ -293,6 +300,7 @@ export const MediaView: FC<Props> = ({
         )}
         {primaryButton}
       </div>
+      {overlay}
     </animated.div>
   );
 };

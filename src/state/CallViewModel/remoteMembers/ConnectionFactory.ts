@@ -152,7 +152,9 @@ function generateRoomOption({
   let videoCaptureDefaults = {
     ...liveKitOptions.videoCaptureDefaults,
     deviceId: devices.videoInput.selected$.value?.id,
-    processor: processorState.blurEnabled ? processorState.processor : undefined,
+    processor: processorState.blurEnabled
+      ? processorState.processor
+      : undefined,
   };
   let publishDefaults = liveKitOptions.publishDefaults;
 
@@ -193,6 +195,10 @@ function generateRoomOption({
         : devices.audioOutput.selected$.value?.id,
     },
     e2ee: e2eeLivekitOptions,
+    // The same keys again as `encryption`, which also encrypts data channel
+    // messages (drawing on a screen share) along with the media. `e2ee` stays:
+    // LiveKit keys its Safari < 17.2 simulcast guard on that one alone.
+    encryption: e2eeLivekitOptions,
     // TODO test and consider this:
     // webAudioMix: true,
   };

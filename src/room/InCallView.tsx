@@ -88,6 +88,8 @@ import { ObservableScope } from "../state/ObservableScope.ts";
 import { useLatest } from "../useLatest.ts";
 import { CallFooter } from "../components/CallFooter.tsx";
 import { SettingsIconButton } from "../button/Button.tsx";
+import { AnnotationBus } from "../annotations/AnnotationBus.ts";
+import { AnnotationContext } from "../annotations/AnnotationLayer.tsx";
 
 declare module "react" {
   interface CSSProperties {
@@ -612,56 +614,70 @@ export const InCallView: FC<InCallViewProps> = ({
   );
   const allConnections = useBehavior(vm.allConnections$);
 
+  // Drawing on screen shares travels between everyone over the call's rooms.
+  const [annotationBus] = useState(() => new AnnotationBus());
+  useEffect(() => (): void => annotationBus.dispose(), [annotationBus]);
+  useEffect(() => {
+    annotationBus.setRooms(
+      allConnections
+        .getConnections()
+        .map((connection) => connection.livekitRoom),
+    );
+  }, [annotationBus, allConnections]);
+
   return (
-    // The pointer handler here exists to control the visibility of the footer,
-    // and the footer is also viewable by moving focus into it, so this is fine.
-    // eslint-disable-next-line jsx-a11y/no-static-element-interactions
-    <div
-      className={styles.inRoom}
-      ref={containerRef}
-      onPointerUp={onViewPointerUp}
-      onPointerMove={onPointerMove}
-      onPointerOut={onPointerOut}
-    >
-      {header}
-      {audioParticipants.map(({ livekitRoom, url, participants }) => (
-        <LivekitRoomAudioRenderer
-          key={url}
-          url={url}
-          livekitRoom={livekitRoom}
-          validIdentities={participants}
-          muted={muteAllAudio}
-        />
-      ))}
-      {renderContent()}
-      <CallEventAudioRenderer vm={vm} muted={muteAllAudio} />
-      <ReactionsAudioRenderer vm={vm} muted={muteAllAudio} />
-      {reconnectingToast}
-      {earpieceOverlay}
-      <ReactionsOverlay vm={vm} />
-      {footer}
-      {layout.type !== "pip" && (
-        <>
-          <RageshakeRequestModal {...rageshakeRequestModalProps} />
-          <SettingsModal
-            client={client}
-            roomId={matrixRoom.roomId}
-            open={settingsModalOpen}
-            onDismiss={closeSettings}
-            tab={settingsTab}
-            onTabChange={setSettingsTab}
-            livekitRooms={allConnections
-              .getConnections()
-              .map((connectionItem) => ({
-                room: connectionItem.livekitRoom,
-                livekitAlias: connectionItem.livekitAlias,
-                // TODO compute is local or tag it in the livekit room items already
-                isLocal: undefined,
-                url: connectionItem.transport.livekit_service_url,
-              }))}
+    <AnnotationContext.Provider value={annotationBus}>
+      {/* The pointer handler here exists to control the visibility of the
+          footer, and the footer is also viewable by moving focus into it, so
+          this is fine. */}
+      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
+      <div
+        className={styles.inRoom}
+        ref={containerRef}
+        onPointerUp={onViewPointerUp}
+        onPointerMove={onPointerMove}
+        onPointerOut={onPointerOut}
+      >
+        {header}
+        {audioParticipants.map(({ livekitRoom, url, participants }) => (
+          <LivekitRoomAudioRenderer
+            key={url}
+            url={url}
+            livekitRoom={livekitRoom}
+            validIdentities={participants}
+            muted={muteAllAudio}
           />
-        </>
-      )}
-    </div>
+        ))}
+        {renderContent()}
+        <CallEventAudioRenderer vm={vm} muted={muteAllAudio} />
+        <ReactionsAudioRenderer vm={vm} muted={muteAllAudio} />
+        {reconnectingToast}
+        {earpieceOverlay}
+        <ReactionsOverlay vm={vm} />
+        {footer}
+        {layout.type !== "pip" && (
+          <>
+            <RageshakeRequestModal {...rageshakeRequestModalProps} />
+            <SettingsModal
+              client={client}
+              roomId={matrixRoom.roomId}
+              open={settingsModalOpen}
+              onDismiss={closeSettings}
+              tab={settingsTab}
+              onTabChange={setSettingsTab}
+              livekitRooms={allConnections
+                .getConnections()
+                .map((connectionItem) => ({
+                  room: connectionItem.livekitRoom,
+                  livekitAlias: connectionItem.livekitAlias,
+                  // TODO compute is local or tag it in the livekit room items already
+                  isLocal: undefined,
+                  url: connectionItem.transport.livekit_service_url,
+                }))}
+            />
+          </>
+        )}
+      </div>
+    </AnnotationContext.Provider>
   );
 };
