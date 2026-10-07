@@ -19,8 +19,8 @@ import rnnoiseWorkletModuleUrl from "./RNNoiseWorkletModule.ts?worker&url";
  * The number of samples per frame expected by RNNoise (at 48kHz = 10ms).
  */
 const RNNOISE_SAMPLE_LENGTH = 480;
-const RNNOISE_REQUIRED_SAMPLE_RATE = 48000;
-const RNNOISE_WORKLET_NAME = "rnnoise-processor";
+export const RNNOISE_REQUIRED_SAMPLE_RATE = 48000;
+export const RNNOISE_WORKLET_NAME = "rnnoise-processor";
 const DEFAULT_RNNOISE_PRESET: RNNoiseSuppressionPreset = "conservative";
 // Stores the addModule() promise per AudioContext: pending while in-flight,
 // settled (resolved) once complete, absent on failure (cleared for retry).
@@ -35,13 +35,13 @@ type RNNoiseSupportGlobal = typeof globalThis & {
   };
 };
 
-function createUnsupportedSampleRateError(sampleRate: number): Error {
+export function createUnsupportedSampleRateError(sampleRate: number): Error {
   return new Error(
     `RNNoise requires an AudioContext sample rate of ${RNNOISE_REQUIRED_SAMPLE_RATE}Hz (received ${sampleRate}Hz).`,
   );
 }
 
-function warnUnsupportedSampleRate(sampleRate: number): void {
+export function warnUnsupportedSampleRate(sampleRate: number): void {
   if (warnedUnsupportedSampleRates.has(sampleRate)) {
     return;
   }
@@ -50,6 +50,24 @@ function warnUnsupportedSampleRate(sampleRate: number): void {
   logger.warn(
     `Skipping RNNoise because AudioContext sample rate is ${sampleRate}Hz (expected ${RNNOISE_REQUIRED_SAMPLE_RATE}Hz).`,
   );
+}
+
+/**
+ * Loads the RNNoise worklet into `audioContext`, once per context.
+ */
+export async function registerRNNoiseWorklet(
+  audioContext: AudioContext,
+): Promise<void> {
+  const existing = workletRegistrations.get(audioContext);
+  if (existing) return existing;
+
+  const pending = audioContext.audioWorklet.addModule(rnnoiseWorkletModuleUrl);
+  workletRegistrations.set(audioContext, pending);
+  // On failure, remove the entry so the next call can retry.
+  pending.catch(() => {
+    workletRegistrations.delete(audioContext);
+  });
+  return pending;
 }
 
 /**
@@ -364,18 +382,7 @@ export class RNNoiseProcessor implements TrackProcessor<
   private async ensureWorkletRegistered(
     audioContext: AudioContext,
   ): Promise<void> {
-    const existing = workletRegistrations.get(audioContext);
-    if (existing) return existing;
-
-    const pending = audioContext.audioWorklet.addModule(
-      rnnoiseWorkletModuleUrl,
-    );
-    workletRegistrations.set(audioContext, pending);
-    // On failure, remove the entry so the next call can retry.
-    pending.catch(() => {
-      workletRegistrations.delete(audioContext);
-    });
-    return pending;
+    return registerRNNoiseWorklet(audioContext);
   }
 
   public async init(opts: AudioProcessorOptions): Promise<void> {

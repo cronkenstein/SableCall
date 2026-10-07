@@ -10,6 +10,7 @@ import { BehaviorSubject } from "rxjs";
 
 import { PosthogAnalytics } from "../analytics/PosthogAnalytics";
 import type { RNNoiseSuppressionPreset } from "../audio/rnnoiseTypes";
+import type { VoiceEffectPreset } from "../audio/voiceEffects";
 import { type Behavior } from "../state/Behavior";
 import { useBehavior } from "../useBehavior";
 
@@ -125,6 +126,12 @@ export const rnnoiseNoiseSuppressionPreset =
     "rnnoise-noise-suppression-preset",
     "conservative",
   );
+
+/** The voice changer's preset; applied to the microphone live, mid-call too. */
+export const voiceEffect = new Setting<VoiceEffectPreset>(
+  "voice-effect",
+  "off",
+);
 
 export const showHandRaisedTimer = new Setting<boolean>(
   "hand-raised-show-timer",

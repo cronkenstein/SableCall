@@ -38,18 +38,26 @@ import { releaseMicrophoneOnMute$ } from "../../../controls.ts";
 import { observeTrackReference$ } from "../../observeTrackReference";
 import { type Connection } from "../remoteMembers/Connection.ts";
 import { ObservableScope } from "../../ObservableScope.ts";
+import { supportsRNNoiseProcessor } from "../../../audio/RNNoiseProcessor.ts";
 import {
-  RNNoiseProcessor,
-  supportsRNNoiseProcessor,
-} from "../../../audio/RNNoiseProcessor.ts";
+  MICROPHONE_PROCESSOR_NAME,
+  MicrophoneProcessor,
+  microphoneProcessorWanted,
+} from "../../../audio/MicrophoneProcessor.ts";
 import { shouldEnableNativeNoiseSuppression } from "../../../audio/noiseSuppressionPolicy.ts";
 import {
   echoCancellationSetting,
   noiseSuppressionSetting,
   rnnoiseNoiseSuppression,
   rnnoiseNoiseSuppressionPreset,
+  voiceEffect,
 } from "../../../settings/settings.ts";
 import type { RNNoiseSuppressionPreset } from "../../../audio/rnnoiseTypes.ts";
+import type { VoiceEffectPreset } from "../../../audio/voiceEffects.ts";
+
+/** Processors this publisher puts on the microphone, under either name it has had. */
+const isOwnMicrophoneProcessor = (name: string | undefined): boolean =>
+  name === MICROPHONE_PROCESSOR_NAME || name === "rnnoise-noise-suppression";
 
 /**
  * A wrapper for a Connection object.
@@ -522,16 +530,23 @@ export class Publisher {
       microphoneTrack$,
       rnnoiseNoiseSuppression.value$,
       rnnoiseNoiseSuppressionPreset.value$,
+      voiceEffect.value$,
     ])
       .pipe(
         scope.bind(),
         distinctUntilChanged(
-          ([aTrack, _aEnabled, aPreset], [bTrack, _bEnabled, bPreset]) => {
-            return aTrack === bTrack && aPreset === bPreset;
+          (
+            [aTrack, _aEnabled, aPreset, aVoice],
+            [bTrack, _bEnabled, bPreset, bVoice],
+          ) => {
+            return (
+              aTrack === bTrack && aPreset === bPreset && aVoice === bVoice
+            );
           },
         ),
       )
-      .subscribe(([microphoneTrack, rnnoiseEnabled, rnnoisePreset]) => {
+      .subscribe(([microphoneTrack, rnnoiseEnabled, rnnoisePreset, voice]) => {
+        // Processors run on the same Web Audio worklets RNNoise needs.
         const rnnoiseSupported = supportsRNNoiseProcessor();
         if (!microphoneTrack || !rnnoiseSupported) {
           this.rnnoisePolicySyncedTrack = microphoneTrack;
@@ -550,10 +565,11 @@ export class Publisher {
               rnnoiseEnabled,
             );
           }
-          await this.syncRNNoiseProcessor(
+          await this.syncMicrophoneProcessor(
             microphoneTrack,
             rnnoiseEnabled,
             rnnoisePreset,
+            voice,
           );
         });
       });
@@ -579,10 +595,11 @@ export class Publisher {
             devices,
             rnnoiseEnabled,
           );
-          await this.syncRNNoiseProcessor(
+          await this.syncMicrophoneProcessor(
             audioTrack,
             rnnoiseEnabled && rnnoiseSupported,
             rnnoiseNoiseSuppressionPreset.getValue(),
+            voiceEffect.getValue(),
           );
         });
       });
@@ -604,7 +621,7 @@ export class Publisher {
     rnnoiseEnabled: boolean,
   ): Promise<void> {
     const activeProcessor = audioTrack.getProcessor();
-    if (activeProcessor?.name === "rnnoise-noise-suppression") {
+    if (isOwnMicrophoneProcessor(activeProcessor?.name)) {
       await audioTrack.stopProcessor();
     }
 
@@ -619,37 +636,46 @@ export class Publisher {
     });
   }
 
-  private async syncRNNoiseProcessor(
+  /**
+   * Puts the microphone processor on, reconfigures it, or takes it off, to match
+   * RNNoise and the voice changer. A running processor is reconfigured in place,
+   * so changing either during a call never restarts the microphone.
+   */
+  private async syncMicrophoneProcessor(
     microphoneTrack: LocalAudioTrack,
     rnnoiseEnabled: boolean,
     rnnoisePreset: RNNoiseSuppressionPreset,
+    voice: VoiceEffectPreset,
   ): Promise<void> {
+    const config = { denoise: rnnoiseEnabled ? rnnoisePreset : null, voice };
     try {
       const processor = microphoneTrack.getProcessor();
-      const rnnoiseActive = processor?.name === "rnnoise-noise-suppression";
-      const rnnoiseProcessor =
-        processor instanceof RNNoiseProcessor ? processor : undefined;
+      const ownProcessor = isOwnMicrophoneProcessor(processor?.name);
 
-      if (rnnoiseEnabled) {
-        if (rnnoiseProcessor) {
-          rnnoiseProcessor.setPreset(rnnoisePreset);
-          return;
-        }
-
-        if (rnnoiseActive) {
-          await microphoneTrack.stopProcessor();
-        }
-        await microphoneTrack.setProcessor(new RNNoiseProcessor(rnnoisePreset));
-      } else if (rnnoiseActive) {
-        await microphoneTrack.stopProcessor();
+      if (!microphoneProcessorWanted(config)) {
+        if (ownProcessor) await microphoneTrack.stopProcessor();
+        return;
       }
+
+      if (processor instanceof MicrophoneProcessor) {
+        await processor.configure(config);
+        return;
+      }
+
+      if (ownProcessor) await microphoneTrack.stopProcessor();
+      await microphoneTrack.setProcessor(new MicrophoneProcessor(config));
     } catch (e) {
-      this.logger.error("Failed to apply RNNoise microphone processor", e);
+      this.logger.error("Failed to apply the microphone processor", e);
       if (rnnoiseEnabled && rnnoiseNoiseSuppression.getValue()) {
         this.logger.warn(
           "Disabling RNNoise setting after processor setup failure",
         );
         rnnoiseNoiseSuppression.setValue(false);
+      } else if (voice !== "off" && voiceEffect.getValue() !== "off") {
+        this.logger.warn(
+          "Turning the voice changer off after it failed to start",
+        );
+        voiceEffect.setValue("off");
       }
     }
   }

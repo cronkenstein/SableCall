@@ -30,8 +30,9 @@ import { type MuteStates } from "../../MuteStates";
 import {
   rnnoiseNoiseSuppression,
   rnnoiseNoiseSuppressionPreset,
+  voiceEffect,
 } from "../../../settings/settings";
-import type { RNNoiseProcessor } from "../../../audio/RNNoiseProcessor";
+import type { MicrophoneProcessor } from "../../../audio/MicrophoneProcessor";
 
 let scope: ObservableScope;
 
@@ -327,7 +328,11 @@ describe("Publisher", () => {
         connection,
         mockMediaDevices({}),
         muteStates,
-        constant({ supported: false, processor: undefined, blurEnabled: false }),
+        constant({
+          supported: false,
+          processor: undefined,
+          blurEnabled: false,
+        }),
         logger,
       );
     });
@@ -508,7 +513,11 @@ describe("Publisher", () => {
         connection,
         mockMediaDevices({}),
         muteStates,
-        constant({ supported: false, processor: undefined, blurEnabled: false }),
+        constant({
+          supported: false,
+          processor: undefined,
+          blurEnabled: false,
+        }),
         logger,
       );
       const micTrack = createMockLocalTrack(
@@ -630,13 +639,145 @@ describe("Publisher", () => {
       rnnoiseNoiseSuppression.setValue(true);
       await flushPromises();
 
-      const processor = micTrack.getProcessor() as RNNoiseProcessor;
-      const setPresetSpy = vi.spyOn(processor, "setPreset");
+      const processor = micTrack.getProcessor() as MicrophoneProcessor;
+      const configureSpy = vi.spyOn(processor, "configure");
 
       rnnoiseNoiseSuppressionPreset.setValue("strong");
       await flushPromises();
 
-      expect(setPresetSpy).toHaveBeenCalledWith("strong");
+      expect(configureSpy).toHaveBeenCalledWith({
+        denoise: "strong",
+        voice: "off",
+      });
+    });
+  });
+
+  describe("Voice changer", () => {
+    beforeEach(() => {
+      vi.stubGlobal("AudioWorkletNode", class AudioWorkletNode {});
+      vi.stubGlobal(
+        "AudioWorklet",
+        class AudioWorklet {
+          public async addModule(): Promise<void> {
+            await Promise.resolve();
+          }
+        },
+      );
+      vi.stubGlobal(
+        "MediaStreamAudioDestinationNode",
+        class MediaStreamAudioDestinationNode {},
+      );
+      vi.stubGlobal(
+        "MediaStreamAudioSourceNode",
+        class MediaStreamAudioSourceNode {},
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      voiceEffect.setValue("off");
+      rnnoiseNoiseSuppression.setValue(false);
+    });
+
+    const publishMicrophone = (): LocalTrack & {
+      setProcessor: (...args: unknown[]) => void;
+      stopProcessor: () => void;
+      restartTrack: (...args: unknown[]) => void;
+      getProcessor: () => unknown;
+    } => {
+      const micTrack = createMockLocalTrack(
+        Track.Source.Microphone,
+      ) as LocalTrack & {
+        setProcessor: (...args: unknown[]) => void;
+        stopProcessor: () => void;
+        restartTrack: (...args: unknown[]) => void;
+        getProcessor: () => unknown;
+      };
+      trackPublications.push({
+        source: Track.Source.Microphone,
+        track: micTrack,
+        audioTrack: micTrack,
+      } as unknown as LocalTrackPublication);
+      localParticipant.emit(
+        ParticipantEvent.LocalTrackPublished,
+        trackPublications[0],
+      );
+      return micTrack;
+    };
+
+    it("puts the processor on the microphone for a voice alone", async () => {
+      const micTrack = publishMicrophone();
+
+      voiceEffect.setValue("ghost");
+      await flushPromises();
+
+      expect(micTrack.setProcessor).toHaveBeenCalledOnce();
+      expect(
+        (micTrack.getProcessor() as MicrophoneProcessor).getConfig(),
+      ).toEqual({ denoise: null, voice: "ghost" });
+    });
+
+    it("switches voices in place, without restarting the microphone", async () => {
+      const micTrack = publishMicrophone();
+      voiceEffect.setValue("deep");
+      await flushPromises();
+      const processor = micTrack.getProcessor() as MicrophoneProcessor;
+      const configureSpy = vi.spyOn(processor, "configure");
+
+      voiceEffect.setValue("robot");
+      await flushPromises();
+
+      expect(configureSpy).toHaveBeenCalledWith({
+        denoise: null,
+        voice: "robot",
+      });
+      expect(micTrack.setProcessor).toHaveBeenCalledOnce();
+      expect(micTrack.stopProcessor).not.toHaveBeenCalled();
+      expect(micTrack.restartTrack).not.toHaveBeenCalled();
+    });
+
+    it("takes the processor off when the voice goes back to off", async () => {
+      const micTrack = publishMicrophone();
+      voiceEffect.setValue("high");
+      await flushPromises();
+
+      voiceEffect.setValue("off");
+      await flushPromises();
+
+      expect(micTrack.stopProcessor).toHaveBeenCalledOnce();
+    });
+
+    it("keeps RNNoise running when the voice goes back to off", async () => {
+      const micTrack = publishMicrophone();
+      rnnoiseNoiseSuppression.setValue(true);
+      await flushPromises();
+      voiceEffect.setValue("demon");
+      await flushPromises();
+      const processor = micTrack.getProcessor() as MicrophoneProcessor;
+      const configureSpy = vi.spyOn(processor, "configure");
+
+      voiceEffect.setValue("off");
+      await flushPromises();
+
+      expect(configureSpy).toHaveBeenLastCalledWith({
+        denoise: "conservative",
+        voice: "off",
+      });
+      expect(micTrack.stopProcessor).not.toHaveBeenCalled();
+    });
+
+    it("turns the voice changer off if it cannot start", async () => {
+      const micTrack = publishMicrophone();
+      vi.mocked(micTrack.setProcessor).mockRejectedValueOnce(
+        new Error("worklet failed"),
+      );
+
+      voiceEffect.setValue("robot");
+      for (let i = 0; i < 5; i++) {
+        await flushPromises();
+      }
+
+      expect(voiceEffect.getValue()).toBe("off");
     });
   });
 });

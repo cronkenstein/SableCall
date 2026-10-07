@@ -68,6 +68,7 @@ import { useSubmitRageshake } from "./submit-rageshake";
 import { useUrlParams } from "../UrlParams";
 import { useBehavior } from "../useBehavior";
 import { supportsRNNoiseProcessor } from "../audio/RNNoiseProcessor";
+import { VoiceEffectSettings } from "./VoiceEffectSettings";
 import {
   type RNNoiseSuppressionPreset,
   rnnoiseSuppressionPresets,
@@ -152,7 +153,10 @@ const RejoinNotice: FC = (): ReactNode => {
   return (
     <Alert
       type="info"
-      title={t("settings.rejoin_notice_title", "Takes effect on your next call")}
+      title={t(
+        "settings.rejoin_notice_title",
+        "Takes effect on your next call",
+      )}
     >
       {t(
         "settings.rejoin_notice_description",
@@ -519,6 +523,8 @@ export const SettingsModal: FC<Props> = ({
           </div>
           <Separator />
           <RNNoiseCheckbox />
+          <Separator />
+          <VoiceEffectSettings inCall={(livekitRooms?.length ?? 0) > 0} />
         </Form>
         <Separator />
         <AudioProcessingSettings />
