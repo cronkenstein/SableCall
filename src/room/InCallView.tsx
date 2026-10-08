@@ -286,8 +286,11 @@ export const InCallView: FC<InCallViewProps> = ({
     (e: ReactPointerEvent) => {
       if (
         e.pointerType === "touch" &&
-        // If an interactive element was tapped, don't count this as a tap on the screen
-        (e.target as Element).closest?.("button, input") === null
+        // If an interactive element was tapped, don't count this as a tap on
+        // the screen; nor the end of a stroke drawn on a screen share, which
+        // would otherwise show or hide the controls with every stroke.
+        (e.target as Element).closest?.("button, input, [data-drawing]") ===
+          null
       )
         vm.tapScreen();
     },

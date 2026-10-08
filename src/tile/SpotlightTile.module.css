@@ -129,6 +129,23 @@ Please see LICENSE in the repository root for full details.
   position: static;
 }
 
+/* Maximised edge to edge on a phone, the call's header and footer float over
+the tile and take any tap that lands under them. Keep the tile's own buttons
+clear of them, as the tile's foreground already is. */
+.maximised .topRightButtons {
+  inset-block-start: calc(
+    var(--call-view-safe-area-inset-top, 0px) + var(--cpd-space-1x)
+  );
+  inset-inline-end: calc(env(safe-area-inset-right) + var(--cpd-space-1x));
+}
+
+.maximised .bottomRightButtons {
+  inset-block-end: calc(
+    var(--call-view-safe-area-inset-bottom, 0px) + var(--cpd-space-1x)
+  );
+  inset-inline-end: calc(env(safe-area-inset-right) + var(--cpd-space-1x));
+}
+
 .volumeSlider {
   width: 100%;
   min-width: 172px;
@@ -186,6 +203,23 @@ Please see LICENSE in the repository root for full details.
 .tile:has(:focus-visible) > div > button,
 .tile > div:has([data-state="open"]) > button {
   opacity: 1;
+}
+
+/* A control that is on (drawing, popped out, picture in picture) stays in
+sight, hover or not, and looks pressed. */
+.tile .expand[aria-pressed="true"] {
+  opacity: 1;
+  background: var(--cpd-color-bg-action-primary-rest);
+}
+
+.expand[aria-pressed="true"] > svg {
+  color: var(--cpd-color-icon-on-solid-primary);
+}
+
+@media (hover) {
+  .tile .expand[aria-pressed="true"]:hover {
+    background: var(--cpd-color-bg-action-primary-hovered);
+  }
 }
 
 .indicators {
