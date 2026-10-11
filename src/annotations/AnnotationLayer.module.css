@@ -23,9 +23,12 @@ Please see LICENSE in the repository root for full details.
   border-radius: inherit;
 }
 
-/* ...until drawing is on, when the pointer draws. */
+/* ...until drawing is on, when the pointer draws, and the share is outlined in
+the colour this person draws in, so there is no mistaking that it is on. */
 .layer[data-drawing] {
   pointer-events: auto;
+  box-shadow: inset 0 0 0 3px
+    var(--annotation-colour, var(--cpd-color-border-accent));
 }
 
 .layer[data-drawing] .canvas {

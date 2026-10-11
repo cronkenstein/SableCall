@@ -16,6 +16,27 @@ export const SCREEN_SHARE_POPOUT_URL = "about:blank#sable-popout";
 const POPOUT_NAME = "sable-screen-share";
 const POPOUT_MAX_WIDTH = 640;
 const CLOSED_POLL_MS = 500;
+/** How long the close button shows after opening, before it waits for focus. */
+const CONTROLS_INTRO_MS = 3000;
+
+/**
+ * The host opens the window without a frame (Sable on Windows), so the
+ * picture itself moves the window, as a title bar would: an `app-region: drag`
+ * area, which WebView2 hands to Windows. Such an area gets no pointer events,
+ * so the close button cannot wait for a hover; it shows while the window has
+ * focus instead.
+ */
+const POPOUT_STYLE =
+  "html,body{margin:0;height:100%;background:#000;overflow:hidden}" +
+  "html{app-region:drag;-webkit-app-region:drag}" +
+  "video{display:block;width:100%;height:100%;object-fit:contain}" +
+  "button{position:fixed;top:8px;right:8px;width:28px;height:28px;padding:0;" +
+  "border:0;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;" +
+  "font:20px/28px system-ui,sans-serif;cursor:pointer;" +
+  "app-region:no-drag;-webkit-app-region:no-drag;" +
+  "opacity:0;visibility:hidden;transition:opacity .2s,visibility .2s}" +
+  "button:hover{background:rgba(0,0,0,.85)}" +
+  "html[data-controls] button{opacity:1;visibility:visible}";
 
 export interface ScreenSharePopout {
   /** The pop-out's window, while it is open. */
@@ -94,6 +115,7 @@ export function openScreenSharePopout(
   track: Track,
   source: HTMLVideoElement,
   title: string,
+  closeLabel: string,
   onClosed: () => void,
 ): ScreenSharePopout | null {
   current?.close();
@@ -114,15 +136,32 @@ export function openScreenSharePopout(
   const doc = popup.document;
   doc.title = title;
   const style = doc.createElement("style");
-  style.textContent =
-    "html,body{margin:0;height:100%;background:#000;overflow:hidden}" +
-    "video{display:block;width:100%;height:100%;object-fit:contain}";
+  style.textContent = POPOUT_STYLE;
   doc.head.appendChild(style);
   const video = doc.createElement("video");
   video.autoplay = true;
   video.muted = true;
   video.playsInline = true;
-  doc.body.replaceChildren(video);
+  const closeButton = doc.createElement("button");
+  closeButton.type = "button";
+  closeButton.textContent = "\u00d7";
+  closeButton.title = closeLabel;
+  closeButton.setAttribute("aria-label", closeLabel);
+  closeButton.addEventListener("click", () => close());
+  doc.body.replaceChildren(video, closeButton);
+
+  const showControls = (show: boolean): void => {
+    doc.documentElement.toggleAttribute("data-controls", show);
+  };
+  showControls(true);
+  const introTimer = window.setTimeout(() => {
+    if (!doc.hasFocus()) showControls(false);
+  }, CONTROLS_INTRO_MS);
+  popup.addEventListener("focus", () => showControls(true));
+  popup.addEventListener("blur", () => showControls(false));
+  doc.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
 
   let stopWatching = (): void => {};
   let shownTrack: Track | null = null;
@@ -143,6 +182,7 @@ export function openScreenSharePopout(
     if (closed) return;
     closed = true;
     window.clearInterval(poll);
+    window.clearTimeout(introTimer);
     window.removeEventListener("pagehide", close);
     stopWatching();
     video.srcObject = null;

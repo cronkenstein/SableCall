@@ -37,11 +37,11 @@ import { useTranslation } from "react-i18next";
 import classNames from "classnames";
 import { type TrackReferenceOrPlaceholder } from "@livekit/components-core";
 import { Menu, MenuItem } from "@vector-im/compound-web";
-
 import {
   EditIcon,
   PopOutIcon,
 } from "@vector-im/compound-design-tokens/assets/web/icons";
+
 import FullScreenMaximiseIcon from "../icons/FullScreenMaximise.svg?react";
 import FullScreenMinimiseIcon from "../icons/FullScreenMinimise.svg?react";
 import { MediaView } from "./MediaView";
@@ -540,6 +540,7 @@ export const SpotlightTile: FC<Props> = ({
         defaultValue: "{{name}}'s screen",
         name: visibleMedia.displayName$.value,
       }),
+      t("action.close"),
       () =>
         setPopout((current) => (current?.mediaId === mediaId ? null : current)),
     );
@@ -604,7 +605,7 @@ export const SpotlightTile: FC<Props> = ({
     document.addEventListener("fullscreenchange", onFullscreenChange);
     document.addEventListener("webkitfullscreenchange", onFullscreenChange);
     const unsubscribeHost = subscribeHostFullscreenChanges(setHostFullscreen);
-    return () => {
+    return (): void => {
       document.removeEventListener("fullscreenchange", onFullscreenChange);
       document.removeEventListener(
         "webkitfullscreenchange",
@@ -621,7 +622,7 @@ export const SpotlightTile: FC<Props> = ({
     };
     document.addEventListener("enterpictureinpicture", onPipChange);
     document.addEventListener("leavepictureinpicture", onPipChange);
-    return () => {
+    return (): void => {
       document.removeEventListener("enterpictureinpicture", onPipChange);
       document.removeEventListener("leavepictureinpicture", onPipChange);
     };

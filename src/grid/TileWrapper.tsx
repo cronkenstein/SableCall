@@ -17,6 +17,7 @@ import { type SpringValue } from "@react-spring/web";
 import classNames from "classnames";
 
 import { type TileProps } from "./Grid";
+import { isOnDrawingLayer } from "../annotations/drawingTarget";
 import styles from "./TileWrapper.module.css";
 
 interface Props<M, R extends HTMLElement> {
@@ -63,17 +64,26 @@ const TileWrapper_ = memo(
     height,
   }: Props<M, R>) => {
     const ref = useRef<R | null>(null);
+    // Whether the gesture under way began on a screen share being drawn on:
+    // that is a stroke, and the tile stays where it is.
+    const drawing = useRef(false);
 
-    useDrag((state) => onDrag?.current!(id, state), {
-      target: ref,
-      filterTaps: true,
-      // Previous designs, which allowed tiles to be dragged and dropped around
-      // the scrolling grid, required us to set preventScroll to true here. But
-      // our designs no longer call for this, and meanwhile there's a bug in
-      // use-gesture that causes filterTaps + preventScroll to break buttons
-      // within tiles (like the 'switch camera' button) on mobile.
-      // https://github.com/pmndrs/use-gesture/issues/593
-    });
+    useDrag(
+      (state) => {
+        if (state.first) drawing.current = isOnDrawingLayer(state.event.target);
+        if (!drawing.current) onDrag?.current!(id, state);
+      },
+      {
+        target: ref,
+        filterTaps: true,
+        // Previous designs, which allowed tiles to be dragged and dropped around
+        // the scrolling grid, required us to set preventScroll to true here. But
+        // our designs no longer call for this, and meanwhile there's a bug in
+        // use-gesture that causes filterTaps + preventScroll to break buttons
+        // within tiles (like the 'switch camera' button) on mobile.
+        // https://github.com/pmndrs/use-gesture/issues/593
+      },
+    );
 
     return (
       <Tile

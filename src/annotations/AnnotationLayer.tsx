@@ -7,6 +7,7 @@ Please see LICENSE in the repository root for full details.
 
 import {
   createContext,
+  type CSSProperties,
   type FC,
   type PointerEvent,
   type ReactNode,
@@ -17,6 +18,7 @@ import {
 
 import { type AnnotationBus, type LocalStroke } from "./AnnotationBus";
 import { drawStrokes, pictureRect, toPicturePoint } from "./drawStrokes";
+import { strokeColour } from "./strokes";
 import styles from "./AnnotationLayer.module.css";
 
 /** The call's annotation bus, where there is a call to draw in. */
@@ -146,8 +148,19 @@ export const AnnotationLayer: FC<Props> = ({
     strokeRef.current = null;
   };
 
+  // While drawing, the share is outlined in the colour this person draws in:
+  // the pointer draws now, and in which colour.
+  const identity = drawing ? bus.localIdentity() : undefined;
+  const outline = identity
+    ? ({ "--annotation-colour": strokeColour(identity) } as CSSProperties)
+    : undefined;
+
   return (
-    <div className={styles.layer} data-drawing={drawing || undefined}>
+    <div
+      className={styles.layer}
+      data-drawing={drawing || undefined}
+      style={outline}
+    >
       <canvas
         ref={canvasRef}
         className={styles.canvas}
