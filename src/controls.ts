@@ -8,6 +8,11 @@ Please see LICENSE in the repository root for full details.
 import { BehaviorSubject, Subject } from "rxjs";
 import { logger } from "matrix-js-sdk/lib/logger";
 
+import {
+  getEncryptionReport,
+  type EncryptionReport,
+} from "./livekit/encryptionAudit";
+
 export interface Controls {
   canEnterPip(): boolean;
   enablePip(): void;
@@ -34,6 +39,13 @@ export interface Controls {
    * headsets switch profiles on every keypress.
    */
   setReleaseMicrophoneOnMute(release: boolean): void;
+  /**
+   * Whether this call's media is actually encrypted: what each track
+   * advertises, whether this client decrypts each sender, and what decodes,
+   * with plain-language verdicts. A diagnostic for the hosting client; takes
+   * about 1.5 s.
+   */
+  getEncryptionReport(): Promise<EncryptionReport>;
   showNativeAudioDevicePicker?: () => void;
   onBackButtonPressed?: () => void;
 
@@ -210,6 +222,7 @@ window.controls = {
     // any call exists, and the BehaviorSubject replays it to the next call.
     releaseMicrophoneOnMute$.next(release);
   },
+  getEncryptionReport,
 
   // wrappers for the deprecated controls fields
   setOutputEnabled(enabled: boolean): void {

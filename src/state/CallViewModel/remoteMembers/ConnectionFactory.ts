@@ -24,6 +24,7 @@ import type {
   OpenIDClientParts,
   SFUConfig,
 } from "../../../livekit/openIDSFU.ts";
+import { watchRoomEncryption } from "../../../livekit/encryptionAudit.ts";
 import type { MediaDevices } from "../../MediaDevices.ts";
 import type { Behavior } from "../../Behavior.ts";
 import type { ProcessorState } from "../../../livekit/TrackProcessorContext.tsx";
@@ -74,8 +75,8 @@ export class ECConnectionFactory implements ConnectionFactory {
     echoCancellation: boolean = true,
     noiseSuppression: boolean = true,
   ) {
-    const defaultFactory = (): LivekitRoom =>
-      new LivekitRoom(
+    const defaultFactory = (): LivekitRoom => {
+      const room = new LivekitRoom(
         generateRoomOption({
           devices: this.devices,
           processorState: this.processorState$.value,
@@ -90,6 +91,9 @@ export class ECConnectionFactory implements ConnectionFactory {
           noiseSuppression,
         }),
       );
+      watchRoomEncryption(room);
+      return room;
+    };
     this.livekitRoomFactory = livekitRoomFactory ?? defaultFactory;
   }
 
