@@ -140,6 +140,21 @@ describe("judgeEncryption", () => {
     ]);
   });
 
+  it("leaves out a room that never connected, and waits for one connecting", () => {
+    // Seen on a real call: a room made and never used, with no identity and
+    // no tracks, read as "we are NOT encrypting what we send".
+    const unused = room([], {
+      room: "#1",
+      connection: "disconnected",
+      encrypting: false,
+      local: { identity: "", tracks: [] },
+    });
+    expect(texts([unused])).toEqual([]);
+    expect(
+      texts([room([], { connection: "connecting", encrypting: false })]),
+    ).toEqual(["warn: room #1: still connecting"]);
+  });
+
   it("says so when the call is not encrypted at all", () => {
     expect(texts([room([], { encryptedCall: false })])).toEqual([
       "warn: room #1: not an encrypted call",

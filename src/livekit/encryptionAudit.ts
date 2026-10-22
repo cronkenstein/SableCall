@@ -350,6 +350,13 @@ export function judgeEncryption(rooms: RoomEncryptionReport[]): Verdict[] {
   };
   for (const room of rooms) {
     const at = `room ${room.room}`;
+    // A room made and never connected (or already left) sends and receives
+    // nothing: there is nothing to judge, and "not encrypting" would alarm.
+    if (room.connection === "disconnected") continue;
+    if (room.connection === "connecting") {
+      say("warn", `${at}: still connecting`);
+      continue;
+    }
     if (!room.encryptedCall) {
       say("warn", `${at}: not an encrypted call`);
       continue;
