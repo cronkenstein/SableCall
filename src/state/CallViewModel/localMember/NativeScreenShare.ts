@@ -1269,53 +1269,56 @@ export class NativeScreenShareManager {
         break;
       case "closed":
         this.logger.info("Native screen share media socket closed");
-        void this.stop();
+        void this.stop(session);
         break;
       case "socket-error":
         this.logger.error("Native screen share media socket error");
         this.sendStatus(false, "media socket error");
-        void this.stop();
+        void this.stop(session);
         break;
       default:
         break;
     }
   }
 
-  private async stop(): Promise<void> {
-    const session = this.session;
-    if (!session) return;
-    this.session = null;
-    session.stopped = true;
+  private async stop(session?: ActiveSession): Promise<void> {
+    const s = session ?? this.session;
+    if (!s) return;
+    const isCurrent = s === this.session;
+    if (isCurrent) this.session = null;
+    s.stopped = true;
     this.logger.info("Stopping native screen share");
 
-    if (session.senderStatsTimer !== null) {
-      clearInterval(session.senderStatsTimer);
+    if (s.senderStatsTimer !== null) {
+      clearInterval(s.senderStatsTimer);
     }
-    session.worker.postMessage({ type: "stop" });
-    session.worker.terminate();
-    URL.revokeObjectURL(session.workerUrl);
+    s.worker.postMessage({ type: "stop" });
+    s.worker.terminate();
+    URL.revokeObjectURL(s.workerUrl);
 
-    if (session.published && session.videoTrack) {
-      await session.participant
-        .unpublishTrack(session.videoTrack, true)
+    if (s.published && s.videoTrack) {
+      await s.participant
+        .unpublishTrack(s.videoTrack, true)
         .catch((e) => this.logger.error("Failed to unpublish video track", e));
-      if (session.audioTrack) {
-        await session.participant
-          .unpublishTrack(session.audioTrack, true)
+      if (s.audioTrack) {
+        await s.participant
+          .unpublishTrack(s.audioTrack, true)
           .catch((e) =>
             this.logger.error("Failed to unpublish audio track", e),
           );
       }
     }
-    session.videoTrack?.stop();
-    session.audioTrack?.stop();
-    session.workletNode?.disconnect();
-    if (session.audioContext) {
-      await session.audioContext
+    s.videoTrack?.stop();
+    s.audioTrack?.stop();
+    s.workletNode?.disconnect();
+    if (s.audioContext) {
+      await s.audioContext
         .close()
         .catch((e) => this.logger.warn("Failed to close audio context", e));
     }
-    session.canvas?.remove();
-    this.sendStatus(false);
+    s.canvas?.remove();
+    if (isCurrent) {
+      this.sendStatus(false);
+    }
   }
 }
