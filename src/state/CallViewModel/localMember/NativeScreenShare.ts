@@ -505,6 +505,7 @@ const VIDEO_CODEC_H264 = ${VIDEO_CODEC_H264};
 const AUDIO_FORMAT_F32 = ${AUDIO_FORMAT_F32};
 const VIDEO_HEADER_LEN = ${VIDEO_HEADER_LEN};
 const AUDIO_HEADER_LEN = ${AUDIO_HEADER_LEN};
+console.log("[MW] worker script started");
 
 let ws = null;
 let writer = null;
@@ -554,6 +555,7 @@ const statsTimer = setInterval(() => {
 self.onmessage = (event) => {
   const msg = event.data;
   if (!msg) return;
+  console.log("[MW] message received: " + msg.type);
   if (msg.type === "init") {
     audioPort = msg.audioPort || null;
     initVideoPath();
@@ -564,6 +566,7 @@ self.onmessage = (event) => {
 };
 
 function initVideoPath() {
+  console.log("[MW] initVideoPath, VTG=" + typeof VideoTrackGenerator);
   try {
     if (typeof VideoTrackGenerator === "function") {
       const generator = new VideoTrackGenerator();
@@ -571,24 +574,29 @@ function initVideoPath() {
       generatorTrack = generator.track;
       // Track transfer can fail independently of the constructor.
       self.postMessage({ type: "ready", track: generatorTrack }, [generatorTrack]);
+      console.log("[MW] posted ready with track");
       return;
     }
   } catch (e) {
+    console.log("[MW] VTG failed: " + (e && e.message || String(e)));
     try { if (generatorTrack) generatorTrack.stop(); } catch (_) {}
     writer = null;
     generatorTrack = null;
   }
   self.postMessage({ type: "ready" });
+  console.log("[MW] posted ready (no track)");
 }
 
 function connect(wsUrl, token) {
+  console.log("[MW] connect to " + wsUrl);
   ws = new WebSocket(wsUrl + "?token=" + encodeURIComponent(token));
   ws.binaryType = "arraybuffer";
+  ws.onopen = () => console.log("[MW] ws connected");
   ws.onmessage = (event) => {
     if (event.data instanceof ArrayBuffer) onMedia(event.data);
   };
-  ws.onclose = () => self.postMessage({ type: "closed" });
-  ws.onerror = () => self.postMessage({ type: "socket-error" });
+  ws.onclose = () => { console.log("[MW] ws closed"); self.postMessage({ type: "closed" }); };
+  ws.onerror = () => { console.log("[MW] ws error"); self.postMessage({ type: "socket-error" }); };
 }
 
 function onMedia(buffer) {
@@ -1033,10 +1041,20 @@ export class NativeScreenShareManager {
       workerAudioPort = null;
     }
 
-    const workerUrl = URL.createObjectURL(
-      new Blob([MEDIA_WORKER], { type: "application/javascript" }),
-    );
-    const worker = new Worker(workerUrl);
+    let workerUrl: string;
+    let worker: Worker;
+    try {
+      this.logger.info("[MW-main] MEDIA_WORKER len=" + MEDIA_WORKER.length + " head=" + MEDIA_WORKER.substring(0, 60).replace(/\n/g, "\\n"));
+      workerUrl = URL.createObjectURL(
+        new Blob([MEDIA_WORKER], { type: "application/javascript" }),
+      );
+      this.logger.info("[MW-main] blob created, url=" + workerUrl.substring(0, 50));
+      worker = new Worker(workerUrl);
+      this.logger.info("[MW-main] worker instantiated");
+    } catch (e) {
+      this.logger.error("[MW-main] worker creation failed", e);
+      throw e;
+    }
 
     const session: ActiveSession = {
       worker,
@@ -1058,11 +1076,15 @@ export class NativeScreenShareManager {
 
     const ready = new Promise<MediaWorkerReadyMessage>((resolve, reject) => {
       const timeout = setTimeout(
-        () => reject(new Error("media worker did not become ready")),
+        () => {
+          this.logger.error("[MW-main] TIMEOUT waiting for worker ready");
+          reject(new Error("media worker did not become ready"));
+        },
         5000,
       );
       worker.onmessage = (event: MessageEvent<MediaWorkerMessage>): void => {
         const msg = event.data;
+        this.logger.info("[MW-main] worker message: " + (msg?.type || "unknown"));
         if (msg?.type === "ready") {
           clearTimeout(timeout);
           resolve(msg);
@@ -1071,6 +1093,7 @@ export class NativeScreenShareManager {
         this.onWorkerMessage(session, msg);
       };
       worker.onerror = (event): void => {
+        this.logger.error("[MW-main] worker.onerror: " + (event.message || "no message"));
         clearTimeout(timeout);
         reject(new Error(`media worker error: ${event.message}`));
       };
@@ -1085,6 +1108,7 @@ export class NativeScreenShareManager {
       },
       workerAudioPort ? [workerAudioPort] : [],
     );
+    this.logger.info("[MW-main] init posted to worker, waiting for ready");
 
     const readyMessage = await ready;
     worker.onmessage = (event: MessageEvent<MediaWorkerMessage>): void => {
