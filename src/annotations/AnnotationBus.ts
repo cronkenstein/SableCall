@@ -18,6 +18,7 @@ import {
   StrokeStore,
   decodeSegment,
   encodeSegment,
+  strokeColour,
   type Point,
 } from "./strokes";
 
@@ -40,8 +41,22 @@ export interface LocalStroke {
  * everyone however the call is spread across SFUs; anyone connected to more
  * than one gets it more than once, and the store drops the repeats.
  */
+/** A drawing segment as the host overlay expects it. */
+export interface DrawingSegmentForHost {
+  sender: string;
+  colour: string;
+  stroke: string;
+  segment: number;
+  /** Flat x, y pairs, each 0..10000 across the shared picture. */
+  points: number[];
+  last: boolean;
+}
+
 export class AnnotationBus {
   public readonly store = new StrokeStore();
+  /** Called for every segment applied to the store (local or remote), so the
+   *  host can forward it to the drawing overlay on the sharer's screen. */
+  public onSegment: ((segment: DrawingSegmentForHost) => void) | undefined;
   private readonly rooms = new Map<LivekitRoom, () => void>();
   private nextStroke = 0;
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
@@ -70,6 +85,14 @@ export class AnnotationBus {
           this.store.apply(participant.identity, segment, performance.now())
         ) {
           this.startSweeping();
+          this.onSegment?.({
+            sender: participant.identity,
+            colour: strokeColour(participant.identity),
+            stroke: segment.k,
+            segment: segment.n,
+            points: segment.p,
+            last: segment.e === 1,
+          });
         }
       };
       room.on(RoomEvent.DataReceived, onData);
@@ -106,7 +129,17 @@ export class AnnotationBus {
       segment += 1;
       pending = [];
       const decoded = decodeSegment(payload);
-      if (decoded) this.store.apply(sender, decoded, performance.now());
+      if (decoded) {
+        this.store.apply(sender, decoded, performance.now());
+        this.onSegment?.({
+          sender,
+          colour: strokeColour(sender),
+          stroke: decoded.k,
+          segment: decoded.n,
+          points: decoded.p,
+          last: decoded.e === 1,
+        });
+      }
       this.startSweeping();
       this.publish(payload);
     };

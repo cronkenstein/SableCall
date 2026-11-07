@@ -28,7 +28,7 @@ import { useTranslation } from "react-i18next";
 import { Header, LeftNav, RightNav, RoomHeaderInfo } from "../Header";
 import { HeaderStyle, useUrlParams } from "../UrlParams";
 import { useCallViewKeyboardShortcuts } from "../useCallViewKeyboardShortcuts";
-import { widget } from "../widget";
+import { widget, ElementWidgetActions } from "../widget";
 import styles from "./InCallView.module.css";
 import { GridTile } from "../tile/GridTile";
 import { SettingsModal, defaultSettingsTab } from "../settings/SettingsModal";
@@ -620,6 +620,18 @@ export const InCallView: FC<InCallViewProps> = ({
   // Drawing on screen shares travels between everyone over the call's rooms.
   const [annotationBus] = useState(() => new AnnotationBus());
   useEffect(() => (): void => annotationBus.dispose(), [annotationBus]);
+  // Forward drawing segments (local and remote) to the host so the overlay
+  // on the sharer's screen can render them (macOS/Windows native shares).
+  useEffect(() => {
+    annotationBus.onSegment = (segment): void => {
+      const data: Record<string, unknown> = { ...segment };
+      widget?.api.transport
+        .send(ElementWidgetActions.ScreenShareAnnotation, data)
+        .catch((e: unknown): void => {
+          rootLogger.warn("Could not send a screen share annotation to the host", e);
+        });
+    };
+  }, [annotationBus]);
   useEffect(() => {
     annotationBus.setRooms(
       allConnections

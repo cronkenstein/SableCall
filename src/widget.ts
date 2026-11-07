@@ -68,6 +68,10 @@ export enum ElementWidgetActions {
   ScreenShareAppAudioSelect = "io.sable.screen_share.app_audio_select",
   // fromWidget: the share ended; the host tears the routing down.
   ScreenShareAppAudioStopped = "io.sable.screen_share.app_audio_stopped",
+  // fromWidget (macOS/Windows native shares): a run of a stroke someone drew
+  // on the sharer's own screen share, for the overlay on the sharer's screen.
+  // Payload: { sender, colour, stroke, segment, points, last }.
+  ScreenShareAnnotation = "io.sable.screen_share.annotation",
 }
 
 export interface JoinCallData {
