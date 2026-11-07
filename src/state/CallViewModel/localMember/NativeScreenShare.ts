@@ -929,7 +929,10 @@ export class NativeScreenShareManager {
   }
 
   private async start(payload: NativeScreenShareStartPayload): Promise<void> {
-    if (this.session) await this.stop();
+    if (this.session) {
+      this.logger.info("[MW-main] start(): existing session found, stopping it first");
+      await this.stop();
+    }
 
     const participant = this.participant$.value;
     if (!participant) {
@@ -1287,14 +1290,21 @@ export class NativeScreenShareManager {
     const isCurrent = s === this.session;
     if (isCurrent) this.session = null;
     s.stopped = true;
-    this.logger.info("Stopping native screen share");
+    this.logger.info(
+      `[MW-main] stop() called, isCurrent=${isCurrent}, worker=${s.workerUrl.slice(-12)}`,
+    );
 
     if (s.senderStatsTimer !== null) {
       clearInterval(s.senderStatsTimer);
     }
     s.worker.postMessage({ type: "stop" });
     s.worker.terminate();
-    URL.revokeObjectURL(s.workerUrl);
+    // Delay the Blob URL revocation: revoking while another Worker is
+    // still loading its script from a different Blob URL can confuse
+    // WebKit's Blob URL table and prevent the new Worker's script from
+    // ever executing (no error, no onload — just a silent timeout).
+    const urlToRevoke = s.workerUrl;
+    setTimeout(() => URL.revokeObjectURL(urlToRevoke), 2000);
 
     if (s.published && s.videoTrack) {
       await s.participant
